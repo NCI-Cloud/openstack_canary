@@ -32,6 +32,10 @@ boot_wait=10
 # For Ubuntu images, this is usually 'ubuntu'.
 # For Red Hat and derived distros, this is usually 'fedora' or 'centos'.
 ssh_username=
+# An IP address to ping from inside the instance
+ssh_ping_target=8.8.8.8
+# A hostname to resolve inside the instance
+ssh_resolve_target=www.google.com
 # Cinder volume name
 volume_name=canary_volume
 # Size of Cinder volume in GB
