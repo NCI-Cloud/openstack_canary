@@ -112,7 +112,8 @@ class Canary(object):
         status = self.instance.status
         while status == 'BUILD':
             self.logger.debug(
-                "Instance has status '%s', waiting %ds",
+                "Instance '%s' has status '%s', waiting %ds",
+                self.instance.id,
                 status,
                 int(params['active_poll'])
             )
@@ -128,7 +129,8 @@ class Canary(object):
                 "Instance unexpectedly has status '%s'" % status
             )
         self.logger.info(
-            "Instance has status '%s', waiting %ds for boot",
+            "Instance '%s' has status '%s', waiting %ds for boot",
+            self.instance.id,
             self.instance.status,
             int(params['boot_wait'])
         )
@@ -139,22 +141,26 @@ class Canary(object):
 
     def _is_private(self, address):
         private_patterns = (
-            r'^127.\d{123}.\d{123}.\d{123}$',
-            r'^10.\d{123}.\d{123}.\d{123}$',
-            r'^192.168.\d{123}$',
-            r'^172.(1[6-9]|2[0-9]|3[0-1]).[0-9]{123}.[0-9]{123}$'
+            r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
+            r'^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
+            r'^192\.168\.\d{1,3}$',
+            r'^172\.(1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3}$'
         )
-        private_res = [re.compile(pattern) for pattern in private_patterns]
+        private_res = [re.compile(patt) for patt in private_patterns]
         for private_re in private_res:
             if private_re.match(address):
                 return True
         return False
 
-    def _iter_public_addrs(self):
+    def _iter_addrs(self):
         for name, addresslist in self.instance.networks.iteritems():
             for address in addresslist:
-                if self._is_public(address):
-                    yield (name, address)
+                yield (name, address)
+
+    def _iter_public_addrs(self):
+        for name, address in self._iter_addrs():
+            if self._is_public(address):
+                yield (name, address)
 
     def test_ssh_cmd_output(self, client, command, pattern):
         regex = re.compile(pattern)
@@ -205,18 +211,13 @@ class Canary(object):
         )
 
     def test_ssh_address(self, netname, address):
-        self.logger.info(
-            "Attempting to SSH to '%s' on network '%s'",
-            address,
-            netname
-        )
         try:
             client = SSHClient()
             client.load_system_host_keys()
             client.set_missing_host_key_policy(AutoAddPolicy())
             client.connect(address, username=self.params['ssh_username'])
         except:
-            self.logger.debug(self.instance.get_console_output())
+            self.logger.debug(self.instance.get_console_output(10))
             raise
         self.test_ssh_echo(client)
         if 'ssh_ping_target' in self.params and self.params['ssh_ping_target']:
@@ -224,15 +225,20 @@ class Canary(object):
         if 'ssh_resolve_target' in self.params and self.params['ssh_resolve_target']:
             self.test_ssh_resolve_host(client, self.params['ssh_resolve_target'])
 
-    def test_address(self, name, address):
-        self.test_ssh_address(name, address)
+    def test_address(self, netname, address):
+        self.logger.info(
+            "Testing address '%s' on network '%s'",
+            address,
+            netname
+        )
+        self.test_ssh_address(netname, address)
 
     def test_public_addrs(self):
         public_addrs = [addr for addr in self._iter_public_addrs()]
         if not public_addrs:
-            raise ValueError("No public addresses")
-        for name, address in public_addrs:
-            self.test_address(name, address)
+            raise ValueError("No public addresses", self.instance.networks)
+        for netname, address in public_addrs:
+            self.test_address(netname, address)
 
     def delete(self):
         if 'cleanup' in self.params:
