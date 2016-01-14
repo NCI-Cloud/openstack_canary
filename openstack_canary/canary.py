@@ -15,7 +15,7 @@ from novaclient import client as nova_client
 import novaclient.exceptions as nova_exceptions
 from cinderclient import client as cinder_client
 import cinderclient.exceptions as cinder_exceptions
-from neutronclient import client as neutron_client
+from neutronclient.v2_0 import client as neutron_client
 import time
 import logging
 MODULE_LOGGER = logging.getLogger('openstack_canary.canary')
@@ -79,6 +79,12 @@ class Canary(object):
                 )
         if self.cinder is None:
             raise cinder_exceptions.UnsupportedVersion()
+        self.neutron = neutron_client.Client(
+            username=params['username'],
+            password=params['password'],
+            tenant_name=params['tenant_name'],
+            auth_url=params['auth_url']
+        )
         self.flavor = self.nova.flavors.find(name=params['flavour_name'])
         if 'volume_size' in params and params['volume_size'] and int(params['volume_size']) > 0:
             self.volume = self.cinder.volumes.create(
@@ -234,6 +240,11 @@ class Canary(object):
         self.test_ssh_address(netname, address)
 
     def test_public_addrs(self):
+        public_addrs = [addr for addr in self._iter_public_addrs()]
+        if not public_addrs:
+            # Attempt to add a floating IP
+            floatingip = self.neutron.floating_ips.create()
+            self.instance.add_floating_ip(floatingip)
         public_addrs = [addr for addr in self._iter_public_addrs()]
         if not public_addrs:
             raise ValueError("No public addresses", self.instance.networks)
