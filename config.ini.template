@@ -32,3 +32,7 @@ boot_wait=10
 # For Ubuntu images, this is usually 'ubuntu'.
 # For Red Hat and derived distros, this is usually 'fedora' or 'centos'.
 ssh_username=
+# Cinder volume name
+volume_name=canary_volume
+# Size of Cinder volume in GB
+volume_size=

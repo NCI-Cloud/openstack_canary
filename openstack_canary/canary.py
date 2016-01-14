@@ -64,8 +64,8 @@ class Canary(object):
                 self.cinder = cinder_client.Client(
                     version,
                     params['username'],
-                    self.token,
-                    None,
+                    params['password'],
+                    params['tenant_name'],
                     params['auth_url']
                 )
             except cinder_exceptions.ClientException as exc:
@@ -77,11 +77,17 @@ class Canary(object):
         if self.cinder is None:
             raise cinder_exceptions.UnsupportedVersion()
         self.flavor = self.nova.flavors.find(name=params['flavour_name'])
+        self.volume = self.cinder.volumes.create(
+            availability_zone=params['availability_zone'],
+            display_name=params['volume_name'],
+            size=int(params['volume_size'])
+        )
         self.instance = self.nova.servers.create(
             name=params['instance_name'],
             image=params['image_id'],
             flavor=self.flavor,
             availability_zone=params['availability_zone'],
+            block_device_mapping=dict({'/dev/vdz': self.volume.id}),
             userdata=params['user_data'],
             key_name=params['key_name'],
             security_groups=params['security_group_names'].split()
@@ -147,7 +153,13 @@ class Canary(object):
                 self.test_ssh_address(name, address)
 
     def delete(self):
-        self.instance.delete()
+        if self.volume:
+            try:
+                self.volume.delete()
+            except:
+                pass
+        if self.instance:
+            self.instance.delete()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
