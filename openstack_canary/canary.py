@@ -134,6 +134,28 @@ class Canary(object):
         )
         time.sleep(int(params['boot_wait']))
 
+    def _is_public(self, address):
+        return not self._is_private(address)
+
+    def _is_private(self, address):
+        private_patterns = (
+            r'^127.\d{123}.\d{123}.\d{123}$',
+            r'^10.\d{123}.\d{123}.\d{123}$',
+            r'^192.168.\d{123}$',
+            r'^172.(1[6-9]|2[0-9]|3[0-1]).[0-9]{123}.[0-9]{123}$'
+        )
+        private_res = [re.compile(pattern) for pattern in private_patterns]
+        for private_re in private_res:
+            if private_re.match(address):
+                return True
+        return False
+
+    def _iter_public_addrs(self):
+        for name, addresslist in self.instance.networks.iteritems():
+            for address in addresslist:
+                if self._is_public(address):
+                    yield (name, address)
+
     def test_ssh_cmd_output(self, client, command, pattern):
         regex = re.compile(pattern)
         stdin, stdout, stderr = client.exec_command(command)
@@ -153,19 +175,31 @@ class Canary(object):
             raise ValueError("Expected output not found in test command")
 
     def test_ssh_echo(self, client):
-        self.test_ssh_cmd_output(client, 'echo CANARY_PAYLOAD', '^CANARY_PAYLOAD$')
+        self.test_ssh_cmd_output(
+            client,
+            'echo CANARY_PAYLOAD',
+            r'^CANARY_PAYLOAD$'
+        )
         self.logger.info(
             "SSH echo test successful"
         )
 
     def test_ssh_ping_host(self, client, host):
-        self.test_ssh_cmd_output(client, 'ping -c 1 ' + host, '[0-9]+ bytes from ' + host)
+        self.test_ssh_cmd_output(
+            client,
+            'ping -c 1 ' + host,
+            r'[0-9]+ bytes from ' + host
+        )
         self.logger.info(
             "SSH ping test successful"
         )
 
     def test_ssh_resolve_host(self, client, host):
-        self.test_ssh_cmd_output(client, 'host ' + host, '^' + host + ' has (.* )?address')
+        self.test_ssh_cmd_output(
+            client,
+            'host ' + host,
+            r'^' + host + ' has (.* )?address'
+        )
         self.logger.info(
             "SSH host resolution successful"
         )
@@ -190,10 +224,15 @@ class Canary(object):
         if 'ssh_resolve_target' in self.params and self.params['ssh_resolve_target']:
             self.test_ssh_resolve_host(client, self.params['ssh_resolve_target'])
 
-    def test_ssh(self):
-        for name, addresslist in self.instance.networks.iteritems():
-            for address in addresslist:
-                self.test_ssh_address(name, address)
+    def test_address(self, name, address):
+        self.test_ssh_address(name, address)
+
+    def test_public_addrs(self):
+        public_addrs = [addr for addr in self._iter_public_addrs()]
+        if not public_addrs:
+            raise ValueError("No public addresses")
+        for name, address in public_addrs:
+            self.test_address(name, address)
 
     def delete(self):
         if 'cleanup' in self.params:
@@ -221,6 +260,6 @@ if __name__ == "__main__":
     config.update(config_file.items('DEFAULT'))
     canary = Canary(config)
     try:
-        canary.test_ssh()
+        canary.test_public_addrs()
     finally:
         canary.delete()
