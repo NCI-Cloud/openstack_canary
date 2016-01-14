@@ -5,6 +5,7 @@ A Canary OpenStack instance, used to test basic OpenStack functionality.
 '''
 
 import os
+import re
 import ConfigParser
 from paramiko.client import SSHClient
 from paramiko import AutoAddPolicy
@@ -133,23 +134,41 @@ class Canary(object):
         )
         time.sleep(int(params['boot_wait']))
 
-    def test_ssh_echo(self, client):
-        stdin, stdout, stderr = client.exec_command('echo CANARY_PAYLOAD')
+    def test_ssh_cmd_output(self, client, command, pattern):
+        regex = re.compile(pattern)
+        stdin, stdout, stderr = client.exec_command(command)
         found_canary = False
-        for line in stdout:
+        stdin.close()
+        stdout_lines = [ line for line in stdout ]
+        for line in stdout_lines:
             line = line.rstrip()
-            # self.logger.debug('STDOUT: ' + line)
-            if line == "CANARY_PAYLOAD":
+            if regex.match(line):
                 found_canary = True
-        if found_canary:
-            self.logger.info(
-                "SSH echo test successful"
-            )
-        else:
+        if not found_canary:
             for line in stderr:
                 line = line.rstrip()
                 self.logger.debug('STDERR: ' + line)
+            for line in stdout_lines:
+                self.logger.debug('STDOUT: ' + line)
             raise ValueError("Expected output not found in test command")
+
+    def test_ssh_echo(self, client):
+        self.test_ssh_cmd_output(client, 'echo CANARY_PAYLOAD', '^CANARY_PAYLOAD$')
+        self.logger.info(
+            "SSH echo test successful"
+        )
+
+    def test_ssh_ping_host(self, client, host):
+        self.test_ssh_cmd_output(client, 'ping -c 1 ' + host, '[0-9]+ bytes from ' + host)
+        self.logger.info(
+            "SSH ping test successful"
+        )
+
+    def test_ssh_resolve_host(self, client, host):
+        self.test_ssh_cmd_output(client, 'host ' + host, '^' + host + ' has (.* )?address')
+        self.logger.info(
+            "SSH host resolution successful"
+        )
 
     def test_ssh_address(self, netname, address):
         self.logger.info(
@@ -166,6 +185,10 @@ class Canary(object):
             self.logger.debug(self.instance.get_console_output())
             raise
         self.test_ssh_echo(client)
+        if 'ssh_ping_target' in self.params and self.params['ssh_ping_target']:
+            self.test_ssh_ping_host(client, self.params['ssh_ping_target'])
+        if 'ssh_resolve_target' in self.params and self.params['ssh_resolve_target']:
+            self.test_ssh_resolve_host(client, self.params['ssh_resolve_target'])
 
     def test_ssh(self):
         for name, addresslist in self.instance.networks.iteritems():
