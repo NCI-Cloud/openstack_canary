@@ -1,0 +1,34 @@
+[DEFAULT]
+
+# Keystone username
+username=
+# Keystone password
+password=
+# Keystone tenant name
+tenant_name=
+# Keystone tenant ID
+tenant_id=
+# Keystone auth URL
+auth_url=
+# Glance image ID to boot instance from
+image_id=
+# Nova flavor name for instance
+flavour_name=
+# Nova instance name
+instance_name=canary
+# Name of Nova availability zone in which to start instance
+availability_zone=
+# Nova instance user data to be passed to instance at boot
+user_data=
+# Nova SSH keypair name to add to instance at boot
+key_name=
+# Nova/Neutron security group names (space-separated list)
+security_group_names=
+# Number of seconds to wait between polling an instance in state BUILD
+active_poll=5
+# Number of seconds to wait for an ACTIVE instance to boot up
+boot_wait=10
+# SSH username used to SSH into instance.
+# For Ubuntu images, this is usually 'ubuntu'.
+# For Red Hat and derived distros, this is usually 'fedora' or 'centos'.
+ssh_username=
