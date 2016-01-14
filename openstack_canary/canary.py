@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 '''
 A Canary OpenStack instance, used to test basic OpenStack functionality.
 '''
@@ -77,17 +79,31 @@ class Canary(object):
         if self.cinder is None:
             raise cinder_exceptions.UnsupportedVersion()
         self.flavor = self.nova.flavors.find(name=params['flavour_name'])
-        self.volume = self.cinder.volumes.create(
-            availability_zone=params['availability_zone'],
-            display_name=params['volume_name'],
-            size=int(params['volume_size'])
-        )
+        if 'volume_size' in params and params['volume_size'] and int(params['volume_size']) > 0:
+            self.volume = self.cinder.volumes.create(
+                availability_zone=params['availability_zone'],
+                display_name=params['volume_name'],
+                size=int(params['volume_size'])
+            )
+            self.logger.info(
+                "Volume %s created",
+                self.volume.id
+            )
+            bdm=dict({'/dev/vdz': self.volume.id})
+        else:
+            self.volume = None
+            bdm=None
+        if 'network_id' in params and params['network_id']:
+            nics=[ dict({'net-id': params['network_id']}) ]
+        else:
+            nics=None
         self.instance = self.nova.servers.create(
             name=params['instance_name'],
             image=params['image_id'],
             flavor=self.flavor,
             availability_zone=params['availability_zone'],
-            block_device_mapping=dict({'/dev/vdz': self.volume.id}),
+            block_device_mapping=bdm,
+            nics=nics,
             userdata=params['user_data'],
             key_name=params['key_name'],
             security_groups=params['security_group_names'].split()
@@ -125,7 +141,11 @@ class Canary(object):
             # self.logger.debug('STDOUT: ' + line)
             if line == "CANARY_PAYLOAD":
                 found_canary = True
-        if not found_canary:
+        if found_canary:
+            self.logger.info(
+                "SSH echo test successful"
+            )
+        else:
             for line in stderr:
                 line = line.rstrip()
                 self.logger.debug('STDERR: ' + line)
@@ -153,13 +173,17 @@ class Canary(object):
                 self.test_ssh_address(name, address)
 
     def delete(self):
-        if self.volume:
-            try:
-                self.volume.delete()
-            except:
-                pass
-        if self.instance:
-            self.instance.delete()
+        if 'cleanup' in self.params:
+            cleanup = self.params['cleanup']
+        else:
+            cleanup = True
+        if cleanup:
+            if self.instance:
+                try:
+                    self.instance.delete()
+                finally:
+                    if self.volume:
+                        self.volume.delete()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
