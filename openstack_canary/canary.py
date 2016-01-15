@@ -20,6 +20,20 @@ from neutronclient.common.exceptions import Conflict, IpAddressInUseClient
 import time
 import logging
 MODULE_LOGGER = logging.getLogger('openstack_canary.canary')
+RFC1918_PATTERNS = (
+    r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
+    r'^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
+    r'^192\.168\.\d{1,3}$',
+    r'^172\.(1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3}$'
+)
+RFC1918_RES = [re.compile(patt) for patt in RFC1918_PATTERNS]
+
+
+def is_rfc1918(address):
+    for private_re in RFC1918_RES:
+        if private_re.match(address):
+            return True
+    return False
 
 
 # FIXME: Obtain these from client libraries or Keystone catalog
@@ -283,17 +297,7 @@ class Canary(object):
             time.sleep(int(self.params['poll_secs']))
 
     def _is_private(self, address):
-        private_patterns = (
-            r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
-            r'^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
-            r'^192\.168\.\d{1,3}$',
-            r'^172\.(1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3}$'
-        )
-        private_res = [re.compile(patt) for patt in private_patterns]
-        for private_re in private_res:
-            if private_re.match(address):
-                return True
-        return False
+        return is_rfc1918(address)
 
     def _is_public(self, address):
         return not self._is_private(address)
