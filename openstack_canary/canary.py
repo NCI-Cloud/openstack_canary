@@ -435,6 +435,8 @@ class Canary(object):
         )
 
     def test_ssh_volume(self, client):
+        if not self.volume:
+            return  # Requires a volume
         dev = self.params['volume_device']
         self.test_ssh_cmd_output(
             client,
@@ -500,14 +502,16 @@ class Canary(object):
                 self.delete_volume()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     realfile = os.path.realpath(__file__)
     realdir = os.path.dirname(realfile)
     pardir = os.path.realpath(os.path.join(realdir, os.pardir))
     config_file_name = os.path.join(pardir, 'config.ini')
-    logger = logging.getLogger("neutronclient.client").setLevel(logging.INFO)
-    logger = logging.getLogger("keystoneclient").setLevel(logging.INFO)
-    logger = logging.getLogger("paramiko.transport").setLevel(logging.INFO)
+    logging.getLogger("neutronclient.client").setLevel(logging.INFO)
+    logging.getLogger("keystoneclient").setLevel(logging.INFO)
+    logging.getLogger("paramiko.transport").setLevel(logging.INFO)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.INFO)
+    logging.getLogger(__package__).setLevel(logging.DEBUG)
     config_file = ConfigParser.SafeConfigParser()
     if not config_file.read(config_file_name):
         raise ValueError("Cannot read config file '%s'" % config_file_name)
