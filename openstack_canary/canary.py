@@ -292,6 +292,61 @@ class Session(object):
         self.get_cinder().volumes.get(volume_id).delete()
         self._wait_volume_deleted(volume_id)
 
+    def attach_any_floating_ip_to_port(self, port):
+        attempt_number = 0
+        while attempt_number < self.params['poll_max']:
+            # Attempt to find a free floating IP
+            floatip = self.find_available_floating_ip(
+                self.params['tenant_id']
+            )
+            # NOTE: Window of vulnerability here.
+            # At this point, something else can begin using the float.
+            try:
+                self.attach_floating_ip_to_port(floatip, port)
+                self.logger.debug(
+                    'Attached float\n%s\nto port\n%s',
+                    floatip,
+                    port
+                )
+                self.logger.debug(
+                    'Waiting %ss for float to become usable',
+                    int(self.params['poll_secs'])
+                )
+                time.sleep(int(self.params['poll_secs']))
+                return floatip
+            except (Conflict, IpAddressInUseClient):
+                # FIXME: What are the exception types possible when
+                # the floating IP address is no longer available,
+                # either nonexistent or already used?
+                attempt_number += 1
+        raise ValueError(
+            "Gave up trying to attach a floating IP after " +
+            (attempt_number + 1) + " attempts"
+        )
+
+    def iter_addrs(self, instance_id):
+        for netname, addresslist in self.get_nova().servers.get(
+            instance_id
+        ).networks.iteritems():
+            for address in addresslist:
+                yield (netname, address)
+
+    def _is_private(self, address):
+        return is_rfc1918(address)
+
+    def _is_public(self, address):
+        return not self._is_private(address)
+
+    def iter_private_addrs(self, instance_id):
+        for netname, address in self.iter_addrs(instance_id):
+            if self._is_private(address):
+                yield (netname, address)
+
+    def iter_public_addrs(self, instance_id):
+        for netname, address in self.iter_addrs(instance_id):
+            if self._is_public(address):
+                yield (netname, address)
+
 
 class Canary(object):
     '''
@@ -371,29 +426,10 @@ class Canary(object):
                 self.session.delete_volume(self.volume_id)
             self.volume_id = None
 
-    def _is_private(self, address):
-        return is_rfc1918(address)
-
-    def _is_public(self, address):
-        return not self._is_private(address)
-
-    def _iter_addrs(self):
-        for netname, addresslist in self.instance().networks.iteritems():
-            for address in addresslist:
-                yield (netname, address)
-
-    def _iter_private_addrs(self):
-        for netname, address in self._iter_addrs():
-            if self._is_private(address):
-                yield (netname, address)
-
-    def _iter_public_addrs(self):
-        for netname, address in self._iter_addrs():
-            if self._is_public(address):
-                yield (netname, address)
-
     def _iter_ports_of_private_ips(self):
-        for (netname, address) in self._iter_private_addrs():
+        for (netname, address) in self.session.iter_private_addrs(
+            self.instance_id
+        ):
             ports = self.session.get_neutron().list_ports(
                 retrieve_all=False,
                 device_id=self.instance_id,
@@ -404,46 +440,17 @@ class Canary(object):
                     self.logger.debug('Port of private address: %s', port)
                     yield port
 
-    def attach_any_floating_ip_to_port(self, port):
-        attempt_number = 0
-        while attempt_number < self.params['poll_max']:
-            # Attempt to find a free floating IP
-            floatip = self.session.find_available_floating_ip(
-                self.params['tenant_id']
-            )
-            # NOTE: Window of vulnerability here.
-            # At this point, something else can begin using the float.
-            try:
-                self.session.attach_floating_ip_to_port(floatip, port)
-                self.logger.debug(
-                    'Attached float\n%s\nto port\n%s',
-                    floatip,
-                    port
-                )
-                self.floating_ip = floatip
-                self.logger.debug(
-                    'Waiting %ss for float to become usable',
-                    int(self.params['poll_secs'])
-                )
-                time.sleep(int(self.params['poll_secs']))
-                return
-            except (Conflict, IpAddressInUseClient):
-                # FIXME: What are the exception types possible when
-                # the floating IP address is no longer available,
-                # either nonexistent or already used?
-                attempt_number += 1
-        raise ValueError(
-            "Gave up trying to attach a floating IP after " +
-            (attempt_number + 1) + " attempts"
-        )
-
     def attach_any_floating_ip_to_any_private_port(self):
         for port in self._iter_ports_of_private_ips():
-            self.attach_any_floating_ip_to_port(port)
+            self.floating_ip = self.session.attach_any_floating_ip_to_port(
+                port
+            )
             return
 
     def make_internet_accessible(self):
-        public_addrs = [addr for addr in self._iter_public_addrs()]
+        public_addrs = [addr for addr in self.session.iter_public_addrs(
+            self.instance_id
+        )]
         if not public_addrs:
             self.logger.debug(
                 "Instance has no public addresses automatically;" +
@@ -544,7 +551,9 @@ class Canary(object):
 
     def test_public_addrs(self):
         self.make_internet_accessible()
-        public_addrs = [addr for addr in self._iter_public_addrs()]
+        public_addrs = [addr for addr in self.session.iter_public_addrs(
+            self.instance_id
+        )]
         if not public_addrs:
             raise ValueError("No public addresses", self.instance().networks)
         for netname, address in public_addrs:
