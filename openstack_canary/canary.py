@@ -63,35 +63,27 @@ class Canary(object):
                 )
         if self.nova is None:
             raise nova_exceptions.UnsupportedVersion()
-        self.cinder = None
-        for version in CINDER_API_VERSIONS:
-            try:
-                self.cinder = cinder_client.Client(
-                    version,
-                    params['username'],
-                    params['password'],
-                    params['tenant_name'],
-                    params['auth_url']
-                )
-            except cinder_exceptions.ClientException as exc:
-                self.logger.debug(
-                    "Failed to instantiate Cinder client for API version '%s': %s",
-                    version,
-                    exc
-                )
-        if self.cinder is None:
-            raise cinder_exceptions.UnsupportedVersion()
         self.flavor = self.nova.flavors.find(name=params['flavour_name'])
+        self.cinder = None
         if 'volume_size' in params and params['volume_size'] and int(params['volume_size']) > 0:
-            self.volume = self.cinder.volumes.create(
-                availability_zone=params['availability_zone'],
-                display_name=params['volume_name'],
-                size=int(params['volume_size'])
-            )
-            self.logger.info(
-                "Volume %s created",
-                self.volume.id
-            )
+            for version in CINDER_API_VERSIONS:
+                try:
+                    self.cinder = cinder_client.Client(
+                        version,
+                        params['username'],
+                        params['password'],
+                        params['tenant_name'],
+                        params['auth_url']
+                    )
+                except cinder_exceptions.ClientException as exc:
+                    self.logger.debug(
+                        "Failed to instantiate Cinder client for API version '%s': %s",
+                        version,
+                        exc
+                    )
+            if self.cinder is None:
+                raise cinder_exceptions.UnsupportedVersion()
+            self.create_volume()
             bdm = dict({'/dev/vdz': self.volume.id})
         else:
             self.volume = None
@@ -144,6 +136,35 @@ class Canary(object):
             int(params['boot_wait'])
         )
         time.sleep(int(params['boot_wait']))
+
+    def create_volume(self):
+        self.volume = self.cinder.volumes.create(
+            availability_zone=self.params['availability_zone'],
+            display_name=self.params['volume_name'],
+            size=int(self.params['volume_size'])
+        )
+        self.wait_volume_creation(self.volume)
+
+    def wait_volume_creation(self, volume):
+        status = volume.status
+        while status == 'creating':
+            self.logger.debug(
+                "Volume '%s' has status '%s', waiting %ds",
+                self.volume.id,
+                status,
+                int(self.params['active_poll'])
+            )
+            time.sleep(int(self.params['active_poll']))
+            self.volume = self.cinder.volumes.get(self.volume.id)
+            status = self.volume.status
+        if status != 'available':
+            raise nova_exceptions.ClientException(
+                "Volume unexpectedly has status '%s'" % status
+            )
+        self.logger.info(
+            "Volume %s created",
+            self.volume.id
+        )
 
     def _is_private(self, address):
         private_patterns = (
@@ -345,6 +366,20 @@ class Canary(object):
         for netname, address in public_addrs:
             self.test_address(netname, address)
 
+    def wait_instance_deleted(self):
+        while True:
+            try:
+                self.instance = self.nova.servers.get(self.instance.id)
+            except nova_exceptions.NotFound:
+                return  # Gone now
+            self.logger.debug(
+                "Instance '%s' has status '%s', waiting %ds",
+                self.instance.id,
+                self.instance.status,
+                int(self.params['active_poll'])
+            )
+            time.sleep(int(self.params['active_poll']))
+
     def delete(self):
         if 'cleanup' in self.params:
             cleanup = self.params['cleanup']
@@ -354,6 +389,7 @@ class Canary(object):
             if self.instance:
                 try:
                     self.instance.delete()
+                    self.wait_instance_deleted()
                 finally:
                     if self.volume:
                         self.volume.delete()
