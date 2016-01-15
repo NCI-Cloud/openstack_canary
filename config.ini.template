@@ -24,8 +24,10 @@ user_data=
 key_name=
 # Nova/Neutron security group names (space-separated list)
 security_group_names=
-# Number of seconds to wait between polling an instance in state BUILD
-active_poll=5
+# Number of seconds to wait between polling APIs for status changes
+poll_secs=10
+# Number of polls on an API to perform before giving up
+poll_max=10
 # Number of seconds to wait for an ACTIVE instance to boot up
 boot_wait=10
 # Number of seconds to wait for a floating IP to become usable

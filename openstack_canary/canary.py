@@ -107,39 +107,49 @@ class Canary(object):
         self.cinder = None
         self.neutron = None
         self.token = None
-        self.instance = None
+        self.volume_id = None
+        self.flavor = None
+        self.instance_id = None
         self.floating_ip = None
+
         # self._init_keystone()
         self._init_nova()
-        self.flavor = self.nova.flavors.find(name=params['flavour_name'])
+        self.flavor = self.nova.flavors.find(name=self.params['flavour_name'])
         if (
-            'volume_size' in params and
-            params['volume_size'] and
-            int(params['volume_size']) > 0
+            'volume_size' in self.params and
+            self.params['volume_size'] and
+            int(self.params['volume_size']) > 0
         ):
-            self.create_volume()
+            self.volume_id = self.create_volume()
             # NOTE: The path below gets ignored, as the guest kernel
             # numbers block devices itself.
-            bdm = dict({params['volume_device']: self.volume.id})
+            bdm = dict({self.params['volume_device']: self.volume_id})
         else:
-            self.volume = None
             bdm = None
-        if 'network_id' in params and params['network_id']:
+        if 'network_id' in self.params and self.params['network_id']:
             self._init_neutron()
-            nics = [dict({'net-id': params['network_id']})]
+            nics = [dict({'net-id': self.params['network_id']})]
         else:
             nics = None
-        self.create_instance(bdm, nics)
+        self.instance_id = self.create_instance(bdm, nics)
         self.logger.info(
             "Instance '%s': waiting %ds for instance boot",
-            self.instance.id,
+            self.instance_id,
             int(self.params['boot_wait'])
         )
-        time.sleep(int(params['boot_wait']))
+        time.sleep(int(self.params['boot_wait']))
+
+    def instance(self):
+        self._init_nova()
+        return self.nova.servers.get(self.instance_id)
+
+    def volume(self):
+        self._init_cinder()
+        return self.cinder.volumes.get(self.volume_id)
 
     def create_instance(self, bdm, nics):
         self._init_nova()
-        self.instance = self.nova.servers.create(
+        instance = self.nova.servers.create(
             name=self.params['instance_name'],
             image=self.params['image_id'],
             flavor=self.flavor,
@@ -150,117 +160,127 @@ class Canary(object):
             key_name=self.params['key_name'],
             security_groups=self.params['security_group_names'].split()
         )
-        self._wait_instance_creation()
+        self._wait_instance_creation(instance.id)
+        return instance.id
 
-    def _wait_instance_creation(self):
+    def _wait_instance_creation(self, instance_id):
         self._init_nova()
-        status = self.instance.status
-        while status == 'BUILD':
+        attempts = 0
+        inst = self.nova.servers.get(instance_id)
+        while (
+            attempts < int(self.params['poll_max']) and
+            inst.status == 'BUILD'
+        ):
             self.logger.debug(
                 "Instance '%s' has status '%s', waiting %ds",
-                self.instance.id,
-                status,
-                int(self.params['active_poll'])
+                instance_id,
+                inst.status,
+                int(self.params['poll_secs'])
             )
-            time.sleep(int(self.params['active_poll']))
-            self.instance = self.nova.servers.get(self.instance.id)
-            status = self.instance.status
-        if status == 'ERROR':
-            self.logger.error(self.instance.diagnostics())
+            attempts += 1
+            time.sleep(int(self.params['poll_secs']))
+            inst = self.nova.servers.get(instance_id)
+        if inst.status == 'ERROR':
+            self.logger.error(inst.diagnostics())
             raise nova_exceptions.InstanceInErrorState()
-        if status != 'ACTIVE':
-            self.logger.error(self.instance.diagnostics())
+        if inst.status != 'ACTIVE':
+            self.logger.error(inst.diagnostics())
             raise nova_exceptions.ClientException(
                 "Instance '%s' unexpectedly has status '%s'" %
-                (self.instance.id, status)
+                (instance_id, inst.status)
             )
         self.logger.info(
             "Instance '%s' has status '%s'",
-            self.instance.id,
-            self.instance.status
+            instance_id,
+            inst.status
         )
 
     def delete_instance(self):
-        if self.instance:
-            self.instance.delete()
-            self._wait_instance_deleted()
+        if self.instance_id:
+            self.instance().delete()
+            self._wait_instance_deleted(self.instance_id)
+            self.instance_id = None
 
-    def _wait_instance_deleted(self):
-        if not self.instance:
-            return  # No instance to wait for
+    def _wait_instance_deleted(self, instance_id):
         self._init_nova()
-        while True:
+        attempts = 0
+        while attempts < int(self.params['poll_max']):
             try:
-                self.instance = self.nova.servers.get(self.instance.id)
+                inst = self.nova.servers.get(instance_id)
             except nova_exceptions.NotFound:
-                self.instance = None
                 return  # Gone now
             self.logger.debug(
                 "Instance '%s' has status '%s', waiting %ds",
-                self.instance.id,
-                self.instance.status,
-                int(self.params['active_poll'])
+                instance_id,
+                inst.status,
+                int(self.params['poll_secs'])
             )
-            time.sleep(int(self.params['active_poll']))
+            attempts += 1
+            time.sleep(int(self.params['poll_secs']))
 
     def get_attached_volumes(self):
         self._init_nova()
-        return self.nova.volumes.get_server_volumes(self.instance.id)
+        return self.nova.volumes.get_server_volumes(self.instance_id)
 
     def create_volume(self):
         self._init_cinder()
-        self.volume = self.cinder.volumes.create(
+        volume = self.cinder.volumes.create(
             availability_zone=self.params['availability_zone'],
             display_name=self.params['volume_name'],
             size=int(self.params['volume_size'])
         )
-        self._wait_volume_creation(self.volume)
+        self._wait_volume_creation(volume.id)
+        return volume.id
 
-    def _wait_volume_creation(self, volume):
+    def _wait_volume_creation(self, volume_id):
         self._init_cinder()
-        status = volume.status
-        while status == 'creating':
+        attempts = 0
+        vol = self.cinder.volumes.get(volume_id)
+        while (
+            attempts < int(self.params['poll_max']) and
+            vol.status == 'creating'
+        ):
             self.logger.debug(
                 "Volume '%s' has status '%s', waiting %ds",
-                self.volume.id,
-                status,
-                int(self.params['active_poll'])
+                volume_id,
+                vol.status,
+                int(self.params['poll_secs'])
             )
-            time.sleep(int(self.params['active_poll']))
-            self.volume = self.cinder.volumes.get(self.volume.id)
-            status = self.volume.status
-        if status != 'available':
+            attempts += 1
+            time.sleep(int(self.params['poll_secs']))
+            vol = self.cinder.volumes.get(volume_id)
+        if vol.status != 'available':
             raise cinder_exceptions.ClientException(
                 "Volume '%s' unexpectedly has status '%s'" %
-                (self.volume.id, status)
+                (volume_id, vol.status)
             )
         self.logger.info(
             "Volume '%s' created",
-            self.volume.id
+            volume_id
         )
 
     def delete_volume(self):
-        if self.volume:
-            self.volume.delete()
-            self._wait_volume_deleted()
+        if self.volume_id:
+            self.volume().delete()
+            self._wait_volume_deleted(self.volume_id)
+            self.volume_id = None
 
-    def _wait_volume_deleted(self):
-        if not self.volume:
-            return  # No volume to wait for
+    def _wait_volume_deleted(self, volume_id):
         self._init_cinder()
-        while True:
+        attempts = 0
+        while attempts < int(self.params['poll_max']):
             try:
-                self.volume = self.cinder.volumes.get(self.volume.id)
+                vol = self.cinder.volumes.get(volume_id)
             except cinder_exceptions.NotFound:
-                self.volume = None
                 return  # Gone now
             self.logger.debug(
                 "Volume '%s' has status '%s', waiting %ds",
-                self.volume.id,
-                self.volume.status,
-                int(self.params['active_poll'])
+                volume_id,
+                vol.status,
+                int(self.params['poll_secs'])
             )
-            time.sleep(int(self.params['active_poll']))
+            attempts += 1
+            time.sleep(int(self.params['poll_secs']))
 
     def _is_private(self, address):
         private_patterns = (
@@ -281,7 +301,7 @@ class Canary(object):
     def _iter_addrs(self):
         if self.floating_ip:
             yield ('floating', self.floating_ip['floating_ip_address'])
-        for netname, addresslist in self.instance.networks.iteritems():
+        for netname, addresslist in self.instance().networks.iteritems():
             for address in addresslist:
                 yield (netname, address)
 
@@ -300,7 +320,7 @@ class Canary(object):
         for (netname, address) in self._iter_private_addrs():
             ports = self.neutron.list_ports(
                 retrieve_all=False,
-                device_id=self.instance.id,
+                device_id=self.instance_id,
                 fixed_ip_address=address
             )
             for port_group in ports:
@@ -343,7 +363,7 @@ class Canary(object):
 
     def attach_any_floating_ip_to_port(self, port):
         attempt_number = 0
-        while attempt_number < 5:
+        while attempt_number < self.params['poll_max']:
             # Attempt to find a free floating IP
             floatip = self.find_free_floating_ip()
             # NOTE: Window of vulnerability here.
@@ -358,9 +378,9 @@ class Canary(object):
                 self.floating_ip = floatip
                 self.logger.debug(
                     'Waiting %ss for float to become usable',
-                    int(self.params['floatip_wait'])
+                    int(self.params['poll_secs'])
                 )
-                time.sleep(int(self.params['floatip_wait']))
+                time.sleep(int(self.params['poll_secs']))
                 return
             except (Conflict, IpAddressInUseClient):
                 # FIXME: What are the exception types possible when
@@ -380,13 +400,11 @@ class Canary(object):
     def make_internet_accessible(self):
         public_addrs = [addr for addr in self._iter_public_addrs()]
         if not public_addrs:
-            if self.neutron:
-                self.attach_any_floating_ip_to_any_private_port()
-            else:
-                raise ValueError(
-                    "Instance has no public addresses automatically," +
-                    " and Neutron support is disabled"
-                )
+            self.logger.debug(
+                "Instance has no public addresses automatically;" +
+                " attempting to attach a floating IP"
+            )
+            self.attach_any_floating_ip_to_any_private_port()
 
     def test_ssh_cmd_output(self, client, command, pattern):
         regex = re.compile(pattern)
@@ -435,7 +453,7 @@ class Canary(object):
         )
 
     def test_ssh_volume(self, client):
-        if not self.volume:
+        if not self.volume_id:
             return  # Requires a volume
         dev = self.params['volume_device']
         self.test_ssh_cmd_output(
@@ -459,7 +477,7 @@ class Canary(object):
             client.set_missing_host_key_policy(AutoAddPolicy())
             client.connect(address, username=self.params['ssh_username'])
         except:
-            self.logger.debug(self.instance.get_console_output(10))
+            self.logger.debug(self.instance().get_console_output(10))
             raise
         self.test_ssh_echo(client)
         if 'ssh_ping_target' in self.params and self.params['ssh_ping_target']:
@@ -486,7 +504,7 @@ class Canary(object):
         self.make_internet_accessible()
         public_addrs = [addr for addr in self._iter_public_addrs()]
         if not public_addrs:
-            raise ValueError("No public addresses", self.instance.networks)
+            raise ValueError("No public addresses", self.instance().networks)
         for netname, address in public_addrs:
             self.test_address(netname, address)
 
