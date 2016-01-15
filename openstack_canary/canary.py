@@ -147,8 +147,10 @@ class Canary(object):
                 return  # Not finished yet
             sftp.chmod(remote_script, 755)
             sftp.close()
-            # FIXME: SHellcode injection
-            stdin, stdout, stderr = client.exec_command(remote_script + ' ' + ' '.join(args))
+            # FIXME: Shellcode injection
+            stdin, stdout, stderr = client.exec_command(
+                remote_script + ' ' + ' '.join(args)
+            )
             found_canary = False
             stdin.close()
             stdout_lines = [line for line in stdout]
@@ -160,7 +162,7 @@ class Canary(object):
                 stderr_lines = [line for line in stderr]
                 self.logger.debug('STDERR:\n' + ''.join(stderr_lines))
                 self.logger.debug('STDOUT:\n' + ''.join(stdout_lines))
-                raise ValueError("Expected output not found in test command")
+                raise ValueError("Expected output not found in test script")
         sftp.put(script, remote_script, callback=on_progress, confirm=True)
 
     def test_ssh_echo(self, client):
@@ -186,9 +188,10 @@ class Canary(object):
         )
 
     def test_ssh_resolve_host(self, client, host):
-        self.test_ssh_cmd_output(
+        self.test_ssh_script_output(
             client,
-            'host ' + host,
+            'test_dns.sh',
+            (host),
             r'^' + host + ' has (.* )?address'
         )
         self.logger.info(
