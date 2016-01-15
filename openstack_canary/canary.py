@@ -199,14 +199,10 @@ class Canary(object):
         if not self.volume_id:
             return  # Requires a volume
         dev = self.params['volume_device']
-        self.test_ssh_cmd_output(
+        self.test_ssh_script_output(
             client,
-            'sudo mkfs.ext4 ' + dev +
-            ' && sudo mount ' + dev + ' /mnt' +
-            ' && sudo sh -c "echo SOME_DATA > /mnt/testfile"' +
-            ' && sudo cat /mnt/testfile' +
-            ' && sudo rm /mnt/testfile' +
-            ' && sudo umount /mnt',
+            'test_volume.sh',
+            (dev, 'SOME_DATA'),
             r'^SOME_DATA$'
         )
         self.logger.info(
