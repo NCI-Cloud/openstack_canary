@@ -174,6 +174,9 @@ class Canary(object):
         }),
         'dns': dict({
             'match': r' has (.* )?address'
+        }),
+        'volume': dict({
+            'match': r'^SOME_DATA$'
         })
     })
 
@@ -210,14 +213,10 @@ class Canary(object):
         )
 
     def test_ssh_volume(self, client, dev):
-        self.test_ssh_script_output(
+        self.test_ssh(
             client,
-            'test_volume.sh',
-            (dev, 'SOME_DATA'),
-            r'^SOME_DATA$'
-        )
-        self.logger.info(
-            "SSH volume test successful"
+            'volume',
+            (dev, 'SOME_DATA')
         )
 
     def test_address(self, netname, address):
