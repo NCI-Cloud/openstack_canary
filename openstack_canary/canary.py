@@ -131,6 +131,167 @@ class Session(object):
         self._init_neutron()
         return self.neutron
 
+    def is_available_floating_ip(self, floatip, tenant_id=None):
+        return (
+            # Belongs to our tenant
+            (
+               tenant_id is None or
+               floatip['tenant_id'] == tenant_id
+            ) and
+            # Not already connected somewhere
+            floatip['port_id'] is None
+        )
+
+    def find_available_floating_ip(self, tenant_id=None):
+        floatips = self.get_neutron().list_floatingips(
+            retrieve_all=False,
+            tenant_id=tenant_id
+            # FIXME: Returns no results
+            # , port_id=None
+        )
+        for floatip_chunk in floatips:
+            for floatip in floatip_chunk['floatingips']:
+                if self.is_available_floating_ip(
+                    floatip,
+                    tenant_id
+                ):
+                    return floatip
+        raise ValueError("No floating IPs available")
+
+    def attach_floating_ip_to_port(self, floatip, port):
+        self.get_neutron().update_floatingip(
+            floatip['id'],
+            dict({
+                'floatingip': dict({
+                    'port_id': port['id']
+                })
+            })
+        )
+
+    def _wait_instance_creation(self, instance_id):
+        attempts = 0
+        inst = self.get_nova().servers.get(instance_id)
+        while (
+            attempts < int(self.params['poll_max']) and
+            inst.status == 'BUILD'
+        ):
+            self.logger.debug(
+                "Instance '%s' has status '%s', waiting %ds",
+                instance_id,
+                inst.status,
+                int(self.params['poll_secs'])
+            )
+            attempts += 1
+            time.sleep(int(self.params['poll_secs']))
+            inst = self.get_nova().servers.get(instance_id)
+        if inst.status == 'ERROR':
+            self.logger.error(inst.diagnostics())
+            raise nova_exceptions.InstanceInErrorState()
+        if inst.status != 'ACTIVE':
+            self.logger.error(inst.diagnostics())
+            raise nova_exceptions.ClientException(
+                "Instance '%s' unexpectedly has status '%s'" %
+                (instance_id, inst.status)
+            )
+        self.logger.info(
+            "Instance '%s' has status '%s'",
+            instance_id,
+            inst.status
+        )
+
+    def create_instance(self, flavour_id, bdm, nics, params):
+        instance = self.get_nova().servers.create(
+            name=self.params['instance_name'],
+            image=self.params['image_id'],
+            flavor=flavour_id,
+            availability_zone=params['availability_zone'],
+            block_device_mapping=bdm,
+            nics=nics,
+            userdata=params['user_data'],
+            key_name=params['key_name'],
+            security_groups=params['security_group_names'].split()
+        )
+        self._wait_instance_creation(instance.id)
+        return instance.id
+
+    def _wait_instance_deleted(self, instance_id):
+        attempts = 0
+        while attempts < int(self.params['poll_max']):
+            try:
+                inst = self.get_nova().servers.get(instance_id)
+            except nova_exceptions.NotFound:
+                return  # Gone now
+            self.logger.debug(
+                "Instance '%s' has status '%s', waiting %ds",
+                instance_id,
+                inst.status,
+                int(self.params['poll_secs'])
+            )
+            attempts += 1
+            time.sleep(int(self.params['poll_secs']))
+
+    def delete_instance(self, instance_id):
+        self.get_nova().servers.get(instance_id).delete()
+        self._wait_instance_deleted(instance_id)
+
+    def get_server_volumes(self, instance_id):
+        return self.get_nova().volumes.get_server_volumes(instance_id)
+
+    def _wait_volume_creation(self, volume_id):
+        attempts = 0
+        vol = self.get_cinder().volumes.get(volume_id)
+        while (
+            attempts < int(self.params['poll_max']) and
+            vol.status == 'creating'
+        ):
+            self.logger.debug(
+                "Volume '%s' has status '%s', waiting %ds",
+                volume_id,
+                vol.status,
+                int(self.params['poll_secs'])
+            )
+            attempts += 1
+            time.sleep(int(self.params['poll_secs']))
+            vol = self.get_cinder().volumes.get(volume_id)
+        if vol.status != 'available':
+            raise cinder_exceptions.ClientException(
+                "Volume '%s' unexpectedly has status '%s'" %
+                (volume_id, vol.status)
+            )
+        self.logger.info(
+            "Volume '%s' created",
+            volume_id
+        )
+
+    def create_volume(self, params):
+        volume = self.get_cinder().volumes.create(
+            availability_zone=params['availability_zone'],
+            display_name=params['volume_name'],
+            size=int(params['volume_size'])
+        )
+        self._wait_volume_creation(volume.id)
+        return volume.id
+
+    def _wait_volume_deleted(self, volume_id):
+        attempts = 0
+        while attempts < int(self.params['poll_max']):
+            try:
+                vol = self.get_cinder().volumes.get(volume_id)
+            except cinder_exceptions.NotFound:
+                return  # Gone now
+            self.logger.debug(
+                "Volume '%s' has status '%s', waiting %ds",
+                volume_id,
+                vol.status,
+                int(self.params['poll_secs'])
+            )
+            attempts += 1
+            time.sleep(int(self.params['poll_secs']))
+
+    def delete_volume(self, volume_id):
+        self.get_cinder().volumes.get(volume_id).delete()
+        self._wait_volume_deleted(volume_id)
+
 
 class Canary(object):
     '''
@@ -166,7 +327,7 @@ class Canary(object):
             self.params['volume_size'] and
             int(self.params['volume_size']) > 0
         ):
-            self.volume_id = self.create_volume()
+            self.volume_id = self.session.create_volume(self.params)
             self.own_volume = True
             # NOTE: The path below gets ignored, as the guest kernel
             # numbers block devices itself.
@@ -177,7 +338,12 @@ class Canary(object):
             nics = [dict({'net-id': self.params['network_id']})]
         else:
             nics = None
-        self.instance_id = self.create_instance(bdm, nics)
+        self.instance_id = self.session.create_instance(
+            self.flavor_id,
+            bdm,
+            nics,
+            self.params
+        )
         self.logger.info(
             "Instance '%s': waiting %ds for instance boot",
             self.instance_id,
@@ -185,140 +351,25 @@ class Canary(object):
         )
         time.sleep(int(self.params['boot_wait']))
 
+    def delete_instance(self):
+        if self.instance_id:
+            self.session.delete_instance(self.instance_id)
+            self.instance_id = None
+
     def instance(self):
         return self.session.get_nova().servers.get(self.instance_id)
 
     def volume(self):
         return self.session.get_cinder().volumes.get(self.volume_id)
 
-    def create_instance(self, bdm, nics):
-        instance = self.session.get_nova().servers.create(
-            name=self.params['instance_name'],
-            image=self.params['image_id'],
-            flavor=self.flavor_id,
-            availability_zone=self.params['availability_zone'],
-            block_device_mapping=bdm,
-            nics=nics,
-            userdata=self.params['user_data'],
-            key_name=self.params['key_name'],
-            security_groups=self.params['security_group_names'].split()
-        )
-        self._wait_instance_creation(instance.id)
-        return instance.id
-
-    def _wait_instance_creation(self, instance_id):
-        attempts = 0
-        inst = self.session.get_nova().servers.get(instance_id)
-        while (
-            attempts < int(self.params['poll_max']) and
-            inst.status == 'BUILD'
-        ):
-            self.logger.debug(
-                "Instance '%s' has status '%s', waiting %ds",
-                instance_id,
-                inst.status,
-                int(self.params['poll_secs'])
-            )
-            attempts += 1
-            time.sleep(int(self.params['poll_secs']))
-            inst = self.session.get_nova().servers.get(instance_id)
-        if inst.status == 'ERROR':
-            self.logger.error(inst.diagnostics())
-            raise nova_exceptions.InstanceInErrorState()
-        if inst.status != 'ACTIVE':
-            self.logger.error(inst.diagnostics())
-            raise nova_exceptions.ClientException(
-                "Instance '%s' unexpectedly has status '%s'" %
-                (instance_id, inst.status)
-            )
-        self.logger.info(
-            "Instance '%s' has status '%s'",
-            instance_id,
-            inst.status
-        )
-
-    def delete_instance(self):
-        if self.instance_id:
-            self.instance().delete()
-            self._wait_instance_deleted(self.instance_id)
-            self.instance_id = None
-
-    def _wait_instance_deleted(self, instance_id):
-        attempts = 0
-        while attempts < int(self.params['poll_max']):
-            try:
-                inst = self.session.get_nova().servers.get(instance_id)
-            except nova_exceptions.NotFound:
-                return  # Gone now
-            self.logger.debug(
-                "Instance '%s' has status '%s', waiting %ds",
-                instance_id,
-                inst.status,
-                int(self.params['poll_secs'])
-            )
-            attempts += 1
-            time.sleep(int(self.params['poll_secs']))
-
     def get_attached_volumes(self):
-        return self.session.get_nova().volumes.get_server_volumes(self.instance_id)
-
-    def create_volume(self):
-        volume = self.session.get_cinder().volumes.create(
-            availability_zone=self.params['availability_zone'],
-            display_name=self.params['volume_name'],
-            size=int(self.params['volume_size'])
-        )
-        self._wait_volume_creation(volume.id)
-        return volume.id
-
-    def _wait_volume_creation(self, volume_id):
-        attempts = 0
-        vol = self.session.get_cinder().volumes.get(volume_id)
-        while (
-            attempts < int(self.params['poll_max']) and
-            vol.status == 'creating'
-        ):
-            self.logger.debug(
-                "Volume '%s' has status '%s', waiting %ds",
-                volume_id,
-                vol.status,
-                int(self.params['poll_secs'])
-            )
-            attempts += 1
-            time.sleep(int(self.params['poll_secs']))
-            vol = self.session.get_cinder().volumes.get(volume_id)
-        if vol.status != 'available':
-            raise cinder_exceptions.ClientException(
-                "Volume '%s' unexpectedly has status '%s'" %
-                (volume_id, vol.status)
-            )
-        self.logger.info(
-            "Volume '%s' created",
-            volume_id
-        )
+        return self.session.get_server_volumes(self.instance_id)
 
     def delete_volume(self):
         if self.volume_id:
             if self.own_volume:
-                self.volume().delete()
-                self._wait_volume_deleted(self.volume_id)
+                self.session.delete_volume(self.volume_id)
             self.volume_id = None
-
-    def _wait_volume_deleted(self, volume_id):
-        attempts = 0
-        while attempts < int(self.params['poll_max']):
-            try:
-                vol = self.session.get_cinder().volumes.get(volume_id)
-            except cinder_exceptions.NotFound:
-                return  # Gone now
-            self.logger.debug(
-                "Volume '%s' has status '%s', waiting %ds",
-                volume_id,
-                vol.status,
-                int(self.params['poll_secs'])
-            )
-            attempts += 1
-            time.sleep(int(self.params['poll_secs']))
 
     def _is_private(self, address):
         return is_rfc1918(address)
@@ -353,46 +404,17 @@ class Canary(object):
                     self.logger.debug('Port of private address: %s', port)
                     yield port
 
-    def is_available_floating_ip(self, floatip):
-        return (
-            # Belongs to our tenant
-            floatip['tenant_id'] == self.params['tenant_id'] and
-            # Not already connected somewhere
-            floatip['port_id'] is None
-        )
-
-    def find_free_floating_ip(self):
-        floatips = self.session.get_neutron().list_floatingips(
-            retrieve_all=False,
-            tenant_id=self.params['tenant_id']
-            # FIXME: Returns no results
-            # , port_id=None
-        )
-        for floatip_chunk in floatips:
-            for floatip in floatip_chunk['floatingips']:
-                if self.is_available_floating_ip(floatip):
-                    return floatip
-        raise ValueError("No floating IPs available")
-
-    def attach_floating_ip_to_port(self, floatip, port):
-        self.session.get_neutron().update_floatingip(
-            floatip['id'],
-            dict({
-                'floatingip': dict({
-                    'port_id': port['id']
-                })
-            })
-        )
-
     def attach_any_floating_ip_to_port(self, port):
         attempt_number = 0
         while attempt_number < self.params['poll_max']:
             # Attempt to find a free floating IP
-            floatip = self.find_free_floating_ip()
+            floatip = self.session.find_available_floating_ip(
+                self.params['tenant_id']
+            )
             # NOTE: Window of vulnerability here.
             # At this point, something else can begin using the float.
             try:
-                self.attach_floating_ip_to_port(floatip, port)
+                self.session.attach_floating_ip_to_port(floatip, port)
                 self.logger.debug(
                     'Attached float\n%s\nto port\n%s',
                     floatip,
