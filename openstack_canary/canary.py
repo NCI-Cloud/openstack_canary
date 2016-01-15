@@ -121,9 +121,9 @@ class Canary(object):
             )
             self.attach_any_floating_ip_to_any_private_port()
 
-    def test_ssh_cmd_output(self, client, command, pattern):
+    def test_ssh_cmd_output(self, ssh, command, pattern):
         regex = re.compile(pattern)
-        stdin, stdout, stderr = client.exec_command(command)
+        stdin, stdout, stderr = ssh.exec_command(command)
         found_canary = False
         stdin.close()
         stdout_lines = [line for line in stdout]
@@ -137,10 +137,10 @@ class Canary(object):
             self.logger.debug('STDOUT:\n' + ''.join(stdout_lines))
             raise ValueError("Expected output not found in test command")
 
-    def test_ssh_script_output(self, client, script, args, pattern):
+    def test_ssh_script_output(self, ssh, script, args, pattern):
         regex = re.compile(pattern)
         remote_script = '/tmp/canary'
-        sftp = client.open_sftp()
+        sftp = ssh.open_sftp()
 
         def on_progress(so_far, remaining):
             if remaining:
@@ -148,7 +148,7 @@ class Canary(object):
             sftp.chmod(remote_script, 755)
             sftp.close()
             # FIXME: Shellcode injection
-            stdin, stdout, stderr = client.exec_command(
+            stdin, stdout, stderr = ssh.exec_command(
                 remote_script + ' ' + ' '.join(args)
             )
             found_canary = False
@@ -180,9 +180,9 @@ class Canary(object):
         })
     })
 
-    def test_ssh(self, client, test_name, args):
+    def test_ssh(self, ssh, test_name, args):
         self.test_ssh_script_output(
-            client,
+            ssh,
             'test_' + test_name + '.sh',
             args,
             self.tests[test_name]['match']
@@ -191,33 +191,49 @@ class Canary(object):
             "SSH " + test_name + " test successful"
         )
 
-    def test_ssh_echo(self, client):
+    def test_ssh_echo(self, ssh):
         self.test_ssh(
-            client,
+            ssh,
             'echo',
             ('CANARY_PAYLOAD')
         )
 
-    def test_ssh_ping(self, client, host):
+    def test_ssh_ping(self, ssh, host):
         self.test_ssh(
-            client,
+            ssh,
             'ping',
             (host),
         )
 
-    def test_ssh_dns(self, client, host):
+    def test_ssh_dns(self, ssh, host):
         self.test_ssh(
-            client,
+            ssh,
             'dns',
             (host)
         )
 
-    def test_ssh_volume(self, client, dev):
+    def test_ssh_volume(self, ssh, dev):
         self.test_ssh(
-            client,
+            ssh,
             'volume',
             (dev, 'SOME_DATA')
         )
+
+    def ssh(self, address):
+        try:
+            ssh = SSHClient()
+            # ssh.load_system_host_keys()
+            """
+            VM instances' IP addresses are indeterminate,
+            so there is no good way to defend against
+            a Man In The Middle attack.
+            """
+            ssh.set_missing_host_key_policy(AutoAddPolicy())
+            ssh.connect(address, username=self.params['ssh_username'])
+        except:
+            self.logger.debug(self.instance().get_console_output(10))
+            raise
+        return ssh
 
     def test_address(self, netname, address):
         self.logger.info(
@@ -225,28 +241,21 @@ class Canary(object):
             address,
             netname
         )
-        try:
-            client = SSHClient()
-            # client.load_system_host_keys()
-            client.set_missing_host_key_policy(AutoAddPolicy())
-            client.connect(address, username=self.params['ssh_username'])
-        except:
-            self.logger.debug(self.instance().get_console_output(10))
-            raise
-        self.test_ssh_echo(client)
+        ssh = self.ssh(address)
+        self.test_ssh_echo(ssh)
         if 'ssh_ping_target' in self.params and self.params['ssh_ping_target']:
-            self.test_ssh_ping(client, self.params['ssh_ping_target'])
+            self.test_ssh_ping(ssh, self.params['ssh_ping_target'])
         if (
             'ssh_resolve_target' in self.params and
             self.params['ssh_resolve_target']
         ):
             self.test_ssh_dns(
-                client,
+                ssh,
                 self.params['ssh_resolve_target']
             )
         if self.volume_id:
-            self.test_ssh_volume(client, self.params['volume_device'])
-        client.close()
+            self.test_ssh_volume(ssh, self.params['volume_device'])
+        ssh.close()
 
     def test_public_addrs(self):
         self.make_internet_accessible()
