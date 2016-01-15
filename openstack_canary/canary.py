@@ -32,20 +32,25 @@ class Canary(object):
     A canary OpenStack instance.
     '''
 
-    def __init__(self, params):
-        self.params = params
-        self.logger = logging.getLogger('openstack_canary.canary.Canary')
-        self.floating_ip = None
+    def _init_keystone(self):
         self.keystone = keystone_client.Client(
-            username=params['username'],
-            password=params['password'],
-            project_name=params['tenant_name'],
-            auth_url=params['auth_url']
+            username=self.params['username'],
+            password=self.params['password'],
+            project_name=self.params['tenant_name'],
+            auth_url=self.params['auth_url']
         )
         self.keystone.authenticate()
         self.token = self.keystone.auth_ref['token']['id']
         # self.logger.debug("Got token: '%s'", self.token)
+
+    def __init__(self, params):
+        self.params = params
+        self.logger = logging.getLogger('openstack_canary.canary.Canary')
+        self.floating_ip = None
         self.nova = None
+        self.keystone = None
+        self.token = None
+        # self._init_keystone()
         for version in NOVA_API_VERSIONS:
             try:
                 self.nova = nova_client.Client(
@@ -57,7 +62,8 @@ class Canary(object):
                 )
             except nova_exceptions.ClientException as exc:
                 self.logger.debug(
-                    "Failed to instantiate Nova client for API version '%s': %s",
+                    "Failed to instantiate Nova client" +
+                    " for API version '%s': %s",
                     version,
                     exc
                 )
@@ -65,7 +71,11 @@ class Canary(object):
             raise nova_exceptions.UnsupportedVersion()
         self.flavor = self.nova.flavors.find(name=params['flavour_name'])
         self.cinder = None
-        if 'volume_size' in params and params['volume_size'] and int(params['volume_size']) > 0:
+        if (
+            'volume_size' in params and
+            params['volume_size'] and
+            int(params['volume_size']) > 0
+        ):
             for version in CINDER_API_VERSIONS:
                 try:
                     self.cinder = cinder_client.Client(
@@ -77,7 +87,8 @@ class Canary(object):
                     )
                 except cinder_exceptions.ClientException as exc:
                     self.logger.debug(
-                        "Failed to instantiate Cinder client for API version '%s': %s",
+                        "Failed to instantiate Cinder client" +
+                        " for API version '%s': %s",
                         version,
                         exc
                     )
@@ -129,13 +140,9 @@ class Canary(object):
         if status != 'ACTIVE':
             self.logger.error(self.instance.diagnostics())
             raise nova_exceptions.ClientException(
-                "Instance '%s' unexpectedly has status '%s'" % (self.instance.id, status)
+                "Instance '%s' unexpectedly has status '%s'" %
+                (self.instance.id, status)
             )
-        """
-        volumes = self.nova.volumes.get_server_volumes(self.instance.id)
-        for volume in volumes:
-            self.logger.debug(volume)
-        """
         self.logger.info(
             "Instance '%s' has status '%s', waiting %ds for boot",
             self.instance.id,
@@ -143,6 +150,9 @@ class Canary(object):
             int(params['boot_wait'])
         )
         time.sleep(int(params['boot_wait']))
+
+    def get_attached_volumes(self):
+        return self.nova.volumes.get_server_volumes(self.instance.id)
 
     def create_volume(self):
         self.volume = self.cinder.volumes.create(
@@ -166,7 +176,8 @@ class Canary(object):
             status = self.volume.status
         if status != 'available':
             raise cinder_exceptions.ClientException(
-                "Volume '%s' unexpectedly has status '%s'" % (self.volume.id, status)
+                "Volume '%s' unexpectedly has status '%s'" %
+                (self.volume.id, status)
             )
         self.logger.info(
             "Volume '%s' created",
@@ -276,7 +287,8 @@ class Canary(object):
                 # either nonexistent or already used?
                 attempt_number += 1
         raise ValueError(
-            "Gave up trying to attach a floating IP after " + (attempt_number + 1) + " attempts"
+            "Gave up trying to attach a floating IP after " +
+            (attempt_number + 1) + " attempts"
         )
 
     def attach_any_floating_ip_to_any_private_port(self):
@@ -291,7 +303,8 @@ class Canary(object):
                 self.attach_any_floating_ip_to_any_private_port()
             else:
                 raise ValueError(
-                    "Instance has no public addresses by default, and Neutron support is disabled"
+                    "Instance has no public addresses automatically," +
+                    " and Neutron support is disabled"
                 )
 
     def test_ssh_cmd_output(self, client, command, pattern):
@@ -299,7 +312,7 @@ class Canary(object):
         stdin, stdout, stderr = client.exec_command(command)
         found_canary = False
         stdin.close()
-        stdout_lines = [ line for line in stdout ]
+        stdout_lines = [line for line in stdout]
         for line in stdout_lines:
             line = line.rstrip()
             if regex.match(line):
@@ -344,7 +357,12 @@ class Canary(object):
         dev = self.params['volume_device']
         self.test_ssh_cmd_output(
             client,
-            'sudo mkfs.ext4 ' + dev + ' && sudo mount ' + dev + ' /mnt && sudo sh -c "echo SOME_DATA > /mnt/testfile" && sudo cat /mnt/testfile && sudo rm /mnt/testfile && sudo umount /mnt',
+            'sudo mkfs.ext4 ' + dev +
+            ' && sudo mount ' + dev + ' /mnt' +
+            ' && sudo sh -c "echo SOME_DATA > /mnt/testfile"' +
+            ' && sudo cat /mnt/testfile' +
+            ' && sudo rm /mnt/testfile' +
+            ' && sudo umount /mnt',
             r'^SOME_DATA$'
         )
         self.logger.info(
@@ -363,8 +381,14 @@ class Canary(object):
         self.test_ssh_echo(client)
         if 'ssh_ping_target' in self.params and self.params['ssh_ping_target']:
             self.test_ssh_ping_host(client, self.params['ssh_ping_target'])
-        if 'ssh_resolve_target' in self.params and self.params['ssh_resolve_target']:
-            self.test_ssh_resolve_host(client, self.params['ssh_resolve_target'])
+        if (
+            'ssh_resolve_target' in self.params and
+            self.params['ssh_resolve_target']
+        ):
+            self.test_ssh_resolve_host(
+                client,
+                self.params['ssh_resolve_target']
+            )
         self.test_ssh_volume(client)
 
     def test_address(self, netname, address):
