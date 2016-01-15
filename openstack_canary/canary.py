@@ -198,10 +198,7 @@ class Canary(object):
             "SSH host resolution successful"
         )
 
-    def test_ssh_volume(self, client):
-        if not self.volume_id:
-            return  # Requires a volume
-        dev = self.params['volume_device']
+    def test_ssh_volume(self, client, dev):
         self.test_ssh_script_output(
             client,
             'test_volume.sh',
@@ -237,7 +234,8 @@ class Canary(object):
                 client,
                 self.params['ssh_resolve_target']
             )
-        self.test_ssh_volume(client)
+        if self.volume_id:
+            self.test_ssh_volume(client, self.params['volume_device'])
         client.close()
 
     def test_public_addrs(self):

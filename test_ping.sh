@@ -1,2 +1,3 @@
-#!/bin/sh
-ping "$1"
+#!/bin/sh -e
+
+ping -c 5 "$1"

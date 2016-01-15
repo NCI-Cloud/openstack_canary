@@ -1,2 +1,3 @@
-#!/bin/sh
+#!/bin/sh -e
+
 echo "$1"
