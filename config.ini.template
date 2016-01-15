@@ -12,8 +12,12 @@ tenant_id=
 auth_url=
 # Glance image ID to boot instance from
 image_id=
-# Nova flavor name for instance
+# Nova flavour ID for instance, spelled either way
+flavour_id=
+flavor_id=
+# Alternatively, Nova flavour name for instance
 flavour_name=
+flavor_name=
 # Nova instance name
 instance_name=canary
 # Name of Nova availability zone in which to start instance

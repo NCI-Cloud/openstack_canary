@@ -41,10 +41,16 @@ NOVA_API_VERSIONS = ("3", "2", "1.1")
 CINDER_API_VERSIONS = ("2", "1")
 
 
-class Canary(object):
-    '''
-    A canary OpenStack instance.
-    '''
+class Session(object):
+
+    def __init__(self, params):
+        self.params = params
+        self.logger = logging.getLogger('openstack_canary.canary.Session')
+        self.nova = None
+        self.keystone = None
+        self.cinder = None
+        self.neutron = None
+        self.token = None
 
     def _init_keystone(self):
         if self.keystone:
@@ -113,35 +119,61 @@ class Canary(object):
             auth_url=self.params['auth_url']
         )
 
+    def get_nova(self):
+        self._init_nova()
+        return self.nova
+
+    def get_cinder(self):
+        self._init_cinder()
+        return self.cinder
+
+    def get_neutron(self):
+        self._init_neutron()
+        return self.neutron
+
+
+class Canary(object):
+    '''
+    A canary OpenStack instance.
+    '''
+
     def __init__(self, params):
         self.params = params
+        self.session = Session(self.params)
         self.logger = logging.getLogger('openstack_canary.canary.Canary')
-        self.nova = None
-        self.keystone = None
-        self.cinder = None
-        self.neutron = None
-        self.token = None
         self.volume_id = None
-        self.flavor = None
+        self.flavor_id = None
         self.instance_id = None
         self.floating_ip = None
 
-        # self._init_keystone()
-        self._init_nova()
-        self.flavor = self.nova.flavors.find(name=self.params['flavour_name'])
         if (
+            ('flavour_id' in self.params and self.params['flavour_id']) or
+            ('flavor_id' in self.params and self.params['flavor_id'])
+        ):
+            self.flavor_id = (
+                self.params['flavour_id'] or self.params['flavor_id']
+            )
+        else:
+            flavor = self.session.get_nova().flavors.find(
+                name=self.params['flavour_name']
+            )
+            self.flavor_id = flavor.id
+        if 'volume_id' in self.params and self.params['volume_id']:
+            self.volume_id = self.params['volume_id']
+            self.own_volume = False
+        elif (
             'volume_size' in self.params and
             self.params['volume_size'] and
             int(self.params['volume_size']) > 0
         ):
             self.volume_id = self.create_volume()
+            self.own_volume = True
             # NOTE: The path below gets ignored, as the guest kernel
             # numbers block devices itself.
             bdm = dict({self.params['volume_device']: self.volume_id})
         else:
             bdm = None
         if 'network_id' in self.params and self.params['network_id']:
-            self._init_neutron()
             nics = [dict({'net-id': self.params['network_id']})]
         else:
             nics = None
@@ -154,19 +186,16 @@ class Canary(object):
         time.sleep(int(self.params['boot_wait']))
 
     def instance(self):
-        self._init_nova()
-        return self.nova.servers.get(self.instance_id)
+        return self.session.get_nova().servers.get(self.instance_id)
 
     def volume(self):
-        self._init_cinder()
-        return self.cinder.volumes.get(self.volume_id)
+        return self.session.get_cinder().volumes.get(self.volume_id)
 
     def create_instance(self, bdm, nics):
-        self._init_nova()
-        instance = self.nova.servers.create(
+        instance = self.session.get_nova().servers.create(
             name=self.params['instance_name'],
             image=self.params['image_id'],
-            flavor=self.flavor,
+            flavor=self.flavor_id,
             availability_zone=self.params['availability_zone'],
             block_device_mapping=bdm,
             nics=nics,
@@ -178,9 +207,8 @@ class Canary(object):
         return instance.id
 
     def _wait_instance_creation(self, instance_id):
-        self._init_nova()
         attempts = 0
-        inst = self.nova.servers.get(instance_id)
+        inst = self.session.get_nova().servers.get(instance_id)
         while (
             attempts < int(self.params['poll_max']) and
             inst.status == 'BUILD'
@@ -193,7 +221,7 @@ class Canary(object):
             )
             attempts += 1
             time.sleep(int(self.params['poll_secs']))
-            inst = self.nova.servers.get(instance_id)
+            inst = self.session.get_nova().servers.get(instance_id)
         if inst.status == 'ERROR':
             self.logger.error(inst.diagnostics())
             raise nova_exceptions.InstanceInErrorState()
@@ -216,11 +244,10 @@ class Canary(object):
             self.instance_id = None
 
     def _wait_instance_deleted(self, instance_id):
-        self._init_nova()
         attempts = 0
         while attempts < int(self.params['poll_max']):
             try:
-                inst = self.nova.servers.get(instance_id)
+                inst = self.session.get_nova().servers.get(instance_id)
             except nova_exceptions.NotFound:
                 return  # Gone now
             self.logger.debug(
@@ -233,12 +260,10 @@ class Canary(object):
             time.sleep(int(self.params['poll_secs']))
 
     def get_attached_volumes(self):
-        self._init_nova()
-        return self.nova.volumes.get_server_volumes(self.instance_id)
+        return self.session.get_nova().volumes.get_server_volumes(self.instance_id)
 
     def create_volume(self):
-        self._init_cinder()
-        volume = self.cinder.volumes.create(
+        volume = self.session.get_cinder().volumes.create(
             availability_zone=self.params['availability_zone'],
             display_name=self.params['volume_name'],
             size=int(self.params['volume_size'])
@@ -247,9 +272,8 @@ class Canary(object):
         return volume.id
 
     def _wait_volume_creation(self, volume_id):
-        self._init_cinder()
         attempts = 0
-        vol = self.cinder.volumes.get(volume_id)
+        vol = self.session.get_cinder().volumes.get(volume_id)
         while (
             attempts < int(self.params['poll_max']) and
             vol.status == 'creating'
@@ -262,7 +286,7 @@ class Canary(object):
             )
             attempts += 1
             time.sleep(int(self.params['poll_secs']))
-            vol = self.cinder.volumes.get(volume_id)
+            vol = self.session.get_cinder().volumes.get(volume_id)
         if vol.status != 'available':
             raise cinder_exceptions.ClientException(
                 "Volume '%s' unexpectedly has status '%s'" %
@@ -275,16 +299,16 @@ class Canary(object):
 
     def delete_volume(self):
         if self.volume_id:
-            self.volume().delete()
-            self._wait_volume_deleted(self.volume_id)
+            if self.own_volume:
+                self.volume().delete()
+                self._wait_volume_deleted(self.volume_id)
             self.volume_id = None
 
     def _wait_volume_deleted(self, volume_id):
-        self._init_cinder()
         attempts = 0
         while attempts < int(self.params['poll_max']):
             try:
-                vol = self.cinder.volumes.get(volume_id)
+                vol = self.session.get_cinder().volumes.get(volume_id)
             except cinder_exceptions.NotFound:
                 return  # Gone now
             self.logger.debug(
@@ -318,9 +342,8 @@ class Canary(object):
                 yield (netname, address)
 
     def _iter_ports_of_private_ips(self):
-        self._init_neutron()
         for (netname, address) in self._iter_private_addrs():
-            ports = self.neutron.list_ports(
+            ports = self.session.get_neutron().list_ports(
                 retrieve_all=False,
                 device_id=self.instance_id,
                 fixed_ip_address=address
@@ -339,8 +362,7 @@ class Canary(object):
         )
 
     def find_free_floating_ip(self):
-        self._init_neutron()
-        floatips = self.neutron.list_floatingips(
+        floatips = self.session.get_neutron().list_floatingips(
             retrieve_all=False,
             tenant_id=self.params['tenant_id']
             # FIXME: Returns no results
@@ -353,8 +375,7 @@ class Canary(object):
         raise ValueError("No floating IPs available")
 
     def attach_floating_ip_to_port(self, floatip, port):
-        self._init_neutron()
-        self.neutron.update_floatingip(
+        self.session.get_neutron().update_floatingip(
             floatip['id'],
             dict({
                 'floatingip': dict({
@@ -472,7 +493,12 @@ class Canary(object):
             "SSH volume test successful"
         )
 
-    def test_ssh_address(self, netname, address):
+    def test_address(self, netname, address):
+        self.logger.info(
+            "Testing address '%s' on network '%s'",
+            address,
+            netname
+        )
         try:
             client = SSHClient()
             # client.load_system_host_keys()
@@ -493,14 +519,6 @@ class Canary(object):
                 self.params['ssh_resolve_target']
             )
         self.test_ssh_volume(client)
-
-    def test_address(self, netname, address):
-        self.logger.info(
-            "Testing address '%s' on network '%s'",
-            address,
-            netname
-        )
-        self.test_ssh_address(netname, address)
 
     def test_public_addrs(self):
         self.make_internet_accessible()
