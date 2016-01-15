@@ -131,9 +131,11 @@ class Canary(object):
             raise nova_exceptions.ClientException(
                 "Instance '%s' unexpectedly has status '%s'" % (self.instance.id, status)
             )
+        """
         volumes = self.nova.volumes.get_server_volumes(self.instance.id)
         for volume in volumes:
             self.logger.debug(volume)
+        """
         self.logger.info(
             "Instance '%s' has status '%s', waiting %ds for boot",
             self.instance.id,
@@ -417,6 +419,7 @@ if __name__ == "__main__":
     config_file_name = os.path.join(pardir, 'config.ini')
     logger = logging.getLogger("neutronclient.client").setLevel(logging.INFO)
     logger = logging.getLogger("keystoneclient").setLevel(logging.INFO)
+    logger = logging.getLogger("paramiko.transport").setLevel(logging.INFO)
     config_file = ConfigParser.SafeConfigParser()
     if not config_file.read(config_file_name):
         raise ValueError("Cannot read config file '%s'" % config_file_name)
