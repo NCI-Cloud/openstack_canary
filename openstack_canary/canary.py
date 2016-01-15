@@ -16,6 +16,7 @@ import novaclient.exceptions as nova_exceptions
 from cinderclient import client as cinder_client
 import cinderclient.exceptions as cinder_exceptions
 from neutronclient.v2_0 import client as neutron_client
+from neutronclient.common.exceptions import Conflict, IpAddressInUseClient
 import time
 import logging
 MODULE_LOGGER = logging.getLogger('openstack_canary.canary')
@@ -34,6 +35,7 @@ class Canary(object):
     def __init__(self, params):
         self.params = params
         self.logger = logging.getLogger('openstack_canary.canary.Canary')
+        self.floating_ip = None
         self.keystone = keystone_client.Client(
             username=params['username'],
             password=params['password'],
@@ -79,12 +81,6 @@ class Canary(object):
                 )
         if self.cinder is None:
             raise cinder_exceptions.UnsupportedVersion()
-        self.neutron = neutron_client.Client(
-            username=params['username'],
-            password=params['password'],
-            tenant_name=params['tenant_name'],
-            auth_url=params['auth_url']
-        )
         self.flavor = self.nova.flavors.find(name=params['flavour_name'])
         if 'volume_size' in params and params['volume_size'] and int(params['volume_size']) > 0:
             self.volume = self.cinder.volumes.create(
@@ -96,14 +92,21 @@ class Canary(object):
                 "Volume %s created",
                 self.volume.id
             )
-            bdm=dict({'/dev/vdz': self.volume.id})
+            bdm = dict({'/dev/vdz': self.volume.id})
         else:
             self.volume = None
-            bdm=None
+            bdm = None
         if 'network_id' in params and params['network_id']:
-            nics=[ dict({'net-id': params['network_id']}) ]
+            self.neutron = neutron_client.Client(
+                username=params['username'],
+                password=params['password'],
+                tenant_name=params['tenant_name'],
+                auth_url=params['auth_url']
+            )
+            nics = [dict({'net-id': params['network_id']})]
         else:
-            nics=None
+            self.neutron = None
+            nics = None
         self.instance = self.nova.servers.create(
             name=params['instance_name'],
             image=params['image_id'],
@@ -142,9 +145,6 @@ class Canary(object):
         )
         time.sleep(int(params['boot_wait']))
 
-    def _is_public(self, address):
-        return not self._is_private(address)
-
     def _is_private(self, address):
         private_patterns = (
             r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
@@ -158,15 +158,113 @@ class Canary(object):
                 return True
         return False
 
+    def _is_public(self, address):
+        return not self._is_private(address)
+
     def _iter_addrs(self):
-        for name, addresslist in self.instance.networks.iteritems():
+        if self.floating_ip:
+            yield ('floating', self.floating_ip['floating_ip_address'])
+        for netname, addresslist in self.instance.networks.iteritems():
             for address in addresslist:
-                yield (name, address)
+                yield (netname, address)
+
+    def _iter_private_addrs(self):
+        for netname, address in self._iter_addrs():
+            if self._is_private(address):
+                yield (netname, address)
 
     def _iter_public_addrs(self):
-        for name, address in self._iter_addrs():
+        for netname, address in self._iter_addrs():
             if self._is_public(address):
-                yield (name, address)
+                yield (netname, address)
+
+    def _iter_ports_of_private_ips(self):
+        for (netname, address) in self._iter_private_addrs():
+            ports = self.neutron.list_ports(
+                retrieve_all=False,
+                device_id=self.instance.id,
+                fixed_ip_address=address
+            )
+            for port_group in ports:
+                for port in port_group['ports']:
+                    self.logger.debug('Port of private address: %s', port)
+                    yield port
+
+    def is_available_floating_ip(self, floatip):
+        return (
+            # Belongs to our tenant
+            floatip['tenant_id'] == self.params['tenant_id'] and
+            # Not already connected somewhere
+            floatip['port_id'] is None
+        )
+
+    def find_free_floating_ip(self):
+        floatips = self.neutron.list_floatingips(
+            retrieve_all=False,
+            tenant_id=self.params['tenant_id']
+            # FIXME: Returns no results
+            # , port_id=None
+        )
+        for floatip_chunk in floatips:
+            for floatip in floatip_chunk['floatingips']:
+                if self.is_available_floating_ip(floatip):
+                    return floatip
+        raise ValueError("No floating IPs available")
+
+    def attach_floating_ip_to_port(self, floatip, port):
+        self.neutron.update_floatingip(
+            floatip['id'],
+            dict({
+                'floatingip': dict({
+                    'port_id': port['id']
+                })
+            })
+        )
+
+    def attach_any_floating_ip_to_port(self, port):
+        attempt_number = 0
+        while attempt_number < 5:
+            # Attempt to find a free floating IP
+            floatip = self.find_free_floating_ip()
+            # NOTE: Window of vulnerability here.
+            # At this point, something else can begin using the float.
+            try:
+                self.attach_floating_ip_to_port(floatip, port)
+                self.logger.debug(
+                    'Attached float\n%s\nto port\n%s',
+                    floatip,
+                    port
+                )
+                self.floating_ip = floatip
+                self.logger.debug(
+                    'Waiting %ss for float to become usable',
+                    int(self.params['floatip_wait'])
+                )
+                time.sleep(int(self.params['floatip_wait']))
+                return
+            except (Conflict, IpAddressInUseClient):
+                # FIXME: What are the exception types possible when
+                # the floating IP address is no longer available,
+                # either nonexistent or already used?
+                attempt_number += 1
+        raise ValueError(
+            "Gave up trying to attach a floating IP after " + (attempt_number + 1) + " attempts"
+        )
+
+    def attach_any_floating_ip_to_any_private_port(self):
+        for port in self._iter_ports_of_private_ips():
+            self.attach_any_floating_ip_to_port(port)
+            return
+
+    def make_internet_accessible(self):
+        public_addrs = [addr for addr in self._iter_public_addrs()]
+        if not public_addrs:
+            if self.neutron:
+                self.attach_any_floating_ip_to_any_private_port()
+            else:
+                raise ValueError(
+                    "Instance has no public addresses by default, and Neutron support is disabled"
+                )
 
     def test_ssh_cmd_output(self, client, command, pattern):
         regex = re.compile(pattern)
@@ -219,7 +317,7 @@ class Canary(object):
     def test_ssh_address(self, netname, address):
         try:
             client = SSHClient()
-            client.load_system_host_keys()
+            # client.load_system_host_keys()
             client.set_missing_host_key_policy(AutoAddPolicy())
             client.connect(address, username=self.params['ssh_username'])
         except:
@@ -240,11 +338,7 @@ class Canary(object):
         self.test_ssh_address(netname, address)
 
     def test_public_addrs(self):
-        public_addrs = [addr for addr in self._iter_public_addrs()]
-        if not public_addrs:
-            # Attempt to add a floating IP
-            floatingip = self.neutron.floating_ips.create()
-            self.instance.add_floating_ip(floatingip)
+        self.make_internet_accessible()
         public_addrs = [addr for addr in self._iter_public_addrs()]
         if not public_addrs:
             raise ValueError("No public addresses", self.instance.networks)
@@ -270,6 +364,8 @@ if __name__ == "__main__":
     realdir = os.path.dirname(realfile)
     pardir = os.path.realpath(os.path.join(realdir, os.pardir))
     config_file_name = os.path.join(pardir, 'config.ini')
+    logger = logging.getLogger("neutronclient.client").setLevel(logging.INFO)
+    logger = logging.getLogger("keystoneclient").setLevel(logging.INFO)
     config_file = ConfigParser.SafeConfigParser()
     if not config_file.read(config_file_name):
         raise ValueError("Cannot read config file '%s'" % config_file_name)

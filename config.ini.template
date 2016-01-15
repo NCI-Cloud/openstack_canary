@@ -28,6 +28,8 @@ security_group_names=
 active_poll=5
 # Number of seconds to wait for an ACTIVE instance to boot up
 boot_wait=10
+# Number of seconds to wait for a floating IP to become usable
+floatip_wait=5
 # SSH username used to SSH into instance.
 # For Ubuntu images, this is usually 'ubuntu'.
 # For Red Hat and derived distros, this is usually 'fedora' or 'centos'.
@@ -40,3 +42,5 @@ ssh_resolve_target=www.google.com
 volume_name=canary_volume
 # Size of Cinder volume in GB
 volume_size=
+# To disable cleanup at end of test, set to empty value:
+#cleanup=
