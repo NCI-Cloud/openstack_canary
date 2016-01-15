@@ -33,6 +33,8 @@ class Canary(object):
     '''
 
     def _init_keystone(self):
+        if self.keystone:
+            return  # Already initialised
         self.keystone = keystone_client.Client(
             username=self.params['username'],
             password=self.params['password'],
@@ -43,22 +45,17 @@ class Canary(object):
         self.token = self.keystone.auth_ref['token']['id']
         # self.logger.debug("Got token: '%s'", self.token)
 
-    def __init__(self, params):
-        self.params = params
-        self.logger = logging.getLogger('openstack_canary.canary.Canary')
-        self.floating_ip = None
-        self.nova = None
-        self.keystone = None
-        self.token = None
-        # self._init_keystone()
+    def _init_nova(self):
+        if self.nova:
+            return  # Already initialised
         for version in NOVA_API_VERSIONS:
             try:
                 self.nova = nova_client.Client(
                     version,
-                    params['username'],
-                    params['password'],
-                    params['tenant_name'],
-                    params['auth_url']
+                    self.params['username'],
+                    self.params['password'],
+                    self.params['tenant_name'],
+                    self.params['auth_url']
                 )
             except nova_exceptions.ClientException as exc:
                 self.logger.debug(
@@ -69,31 +66,57 @@ class Canary(object):
                 )
         if self.nova is None:
             raise nova_exceptions.UnsupportedVersion()
-        self.flavor = self.nova.flavors.find(name=params['flavour_name'])
+
+    def _init_cinder(self):
+        if self.cinder:
+            return  # Already initialised
+        for version in CINDER_API_VERSIONS:
+            try:
+                self.cinder = cinder_client.Client(
+                    version,
+                    self.params['username'],
+                    self.params['password'],
+                    self.params['tenant_name'],
+                    self.params['auth_url']
+                )
+            except cinder_exceptions.ClientException as exc:
+                self.logger.debug(
+                    "Failed to instantiate Cinder client" +
+                    " for API version '%s': %s",
+                    version,
+                    exc
+                )
+        if self.cinder is None:
+            raise cinder_exceptions.UnsupportedVersion()
+
+    def _init_neutron(self):
+        if self.neutron:
+            return  # Already initialised
+        self.neutron = neutron_client.Client(
+            username=self.params['username'],
+            password=self.params['password'],
+            tenant_name=self.params['tenant_name'],
+            auth_url=self.params['auth_url']
+        )
+
+    def __init__(self, params):
+        self.params = params
+        self.logger = logging.getLogger('openstack_canary.canary.Canary')
+        self.nova = None
+        self.keystone = None
         self.cinder = None
+        self.neutron = None
+        self.token = None
+        self.instance = None
+        self.floating_ip = None
+        # self._init_keystone()
+        self._init_nova()
+        self.flavor = self.nova.flavors.find(name=params['flavour_name'])
         if (
             'volume_size' in params and
             params['volume_size'] and
             int(params['volume_size']) > 0
         ):
-            for version in CINDER_API_VERSIONS:
-                try:
-                    self.cinder = cinder_client.Client(
-                        version,
-                        params['username'],
-                        params['password'],
-                        params['tenant_name'],
-                        params['auth_url']
-                    )
-                except cinder_exceptions.ClientException as exc:
-                    self.logger.debug(
-                        "Failed to instantiate Cinder client" +
-                        " for API version '%s': %s",
-                        version,
-                        exc
-                    )
-            if self.cinder is None:
-                raise cinder_exceptions.UnsupportedVersion()
             self.create_volume()
             # NOTE: The path below gets ignored, as the guest kernel
             # numbers block devices itself.
@@ -102,36 +125,44 @@ class Canary(object):
             self.volume = None
             bdm = None
         if 'network_id' in params and params['network_id']:
-            self.neutron = neutron_client.Client(
-                username=params['username'],
-                password=params['password'],
-                tenant_name=params['tenant_name'],
-                auth_url=params['auth_url']
-            )
+            self._init_neutron()
             nics = [dict({'net-id': params['network_id']})]
         else:
-            self.neutron = None
             nics = None
+        self.create_instance(bdm, nics)
+        self.logger.info(
+            "Instance '%s': waiting %ds for instance boot",
+            self.instance.id,
+            int(self.params['boot_wait'])
+        )
+        time.sleep(int(params['boot_wait']))
+
+    def create_instance(self, bdm, nics):
+        self._init_nova()
         self.instance = self.nova.servers.create(
-            name=params['instance_name'],
-            image=params['image_id'],
+            name=self.params['instance_name'],
+            image=self.params['image_id'],
             flavor=self.flavor,
-            availability_zone=params['availability_zone'],
+            availability_zone=self.params['availability_zone'],
             block_device_mapping=bdm,
             nics=nics,
-            userdata=params['user_data'],
-            key_name=params['key_name'],
-            security_groups=params['security_group_names'].split()
+            userdata=self.params['user_data'],
+            key_name=self.params['key_name'],
+            security_groups=self.params['security_group_names'].split()
         )
+        self._wait_instance_creation()
+
+    def _wait_instance_creation(self):
+        self._init_nova()
         status = self.instance.status
         while status == 'BUILD':
             self.logger.debug(
                 "Instance '%s' has status '%s', waiting %ds",
                 self.instance.id,
                 status,
-                int(params['active_poll'])
+                int(self.params['active_poll'])
             )
-            time.sleep(int(params['active_poll']))
+            time.sleep(int(self.params['active_poll']))
             self.instance = self.nova.servers.get(self.instance.id)
             status = self.instance.status
         if status == 'ERROR':
@@ -144,25 +175,49 @@ class Canary(object):
                 (self.instance.id, status)
             )
         self.logger.info(
-            "Instance '%s' has status '%s', waiting %ds for boot",
+            "Instance '%s' has status '%s'",
             self.instance.id,
-            self.instance.status,
-            int(params['boot_wait'])
+            self.instance.status
         )
-        time.sleep(int(params['boot_wait']))
+
+    def delete_instance(self):
+        if self.instance:
+            self.instance.delete()
+            self._wait_instance_deleted()
+
+    def _wait_instance_deleted(self):
+        if not self.instance:
+            return  # No instance to wait for
+        self._init_nova()
+        while True:
+            try:
+                self.instance = self.nova.servers.get(self.instance.id)
+            except nova_exceptions.NotFound:
+                self.instance = None
+                return  # Gone now
+            self.logger.debug(
+                "Instance '%s' has status '%s', waiting %ds",
+                self.instance.id,
+                self.instance.status,
+                int(self.params['active_poll'])
+            )
+            time.sleep(int(self.params['active_poll']))
 
     def get_attached_volumes(self):
+        self._init_nova()
         return self.nova.volumes.get_server_volumes(self.instance.id)
 
     def create_volume(self):
+        self._init_cinder()
         self.volume = self.cinder.volumes.create(
             availability_zone=self.params['availability_zone'],
             display_name=self.params['volume_name'],
             size=int(self.params['volume_size'])
         )
-        self.wait_volume_creation(self.volume)
+        self._wait_volume_creation(self.volume)
 
-    def wait_volume_creation(self, volume):
+    def _wait_volume_creation(self, volume):
+        self._init_cinder()
         status = volume.status
         while status == 'creating':
             self.logger.debug(
@@ -183,6 +238,29 @@ class Canary(object):
             "Volume '%s' created",
             self.volume.id
         )
+
+    def delete_volume(self):
+        if self.volume:
+            self.volume.delete()
+            self._wait_volume_deleted()
+
+    def _wait_volume_deleted(self):
+        if not self.volume:
+            return  # No volume to wait for
+        self._init_cinder()
+        while True:
+            try:
+                self.volume = self.cinder.volumes.get(self.volume.id)
+            except cinder_exceptions.NotFound:
+                self.volume = None
+                return  # Gone now
+            self.logger.debug(
+                "Volume '%s' has status '%s', waiting %ds",
+                self.volume.id,
+                self.volume.status,
+                int(self.params['active_poll'])
+            )
+            time.sleep(int(self.params['active_poll']))
 
     def _is_private(self, address):
         private_patterns = (
@@ -218,6 +296,7 @@ class Canary(object):
                 yield (netname, address)
 
     def _iter_ports_of_private_ips(self):
+        self._init_neutron()
         for (netname, address) in self._iter_private_addrs():
             ports = self.neutron.list_ports(
                 retrieve_all=False,
@@ -238,6 +317,7 @@ class Canary(object):
         )
 
     def find_free_floating_ip(self):
+        self._init_neutron()
         floatips = self.neutron.list_floatingips(
             retrieve_all=False,
             tenant_id=self.params['tenant_id']
@@ -251,6 +331,7 @@ class Canary(object):
         raise ValueError("No floating IPs available")
 
     def attach_floating_ip_to_port(self, floatip, port):
+        self._init_neutron()
         self.neutron.update_floatingip(
             floatip['id'],
             dict({
@@ -407,33 +488,16 @@ class Canary(object):
         for netname, address in public_addrs:
             self.test_address(netname, address)
 
-    def wait_instance_deleted(self):
-        while True:
-            try:
-                self.instance = self.nova.servers.get(self.instance.id)
-            except nova_exceptions.NotFound:
-                return  # Gone now
-            self.logger.debug(
-                "Instance '%s' has status '%s', waiting %ds",
-                self.instance.id,
-                self.instance.status,
-                int(self.params['active_poll'])
-            )
-            time.sleep(int(self.params['active_poll']))
-
     def delete(self):
         if 'cleanup' in self.params:
             cleanup = self.params['cleanup']
         else:
             cleanup = True
         if cleanup:
-            if self.instance:
-                try:
-                    self.instance.delete()
-                    self.wait_instance_deleted()
-                finally:
-                    if self.volume:
-                        self.volume.delete()
+            try:
+                self.delete_instance()
+            finally:
+                self.delete_volume()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
