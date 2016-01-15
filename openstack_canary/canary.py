@@ -299,8 +299,6 @@ class Canary(object):
         return not self._is_private(address)
 
     def _iter_addrs(self):
-        if self.floating_ip:
-            yield ('floating', self.floating_ip['floating_ip_address'])
         for netname, addresslist in self.instance().networks.iteritems():
             for address in addresslist:
                 yield (netname, address)
