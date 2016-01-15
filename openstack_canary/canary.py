@@ -84,7 +84,9 @@ class Canary(object):
             if self.cinder is None:
                 raise cinder_exceptions.UnsupportedVersion()
             self.create_volume()
-            bdm = dict({'/dev/vdz': self.volume.id})
+            # NOTE: The path below gets ignored, as the guest kernel
+            # numbers block devices itself.
+            bdm = dict({params['volume_device']: self.volume.id})
         else:
             self.volume = None
             bdm = None
@@ -127,8 +129,11 @@ class Canary(object):
         if status != 'ACTIVE':
             self.logger.error(self.instance.diagnostics())
             raise nova_exceptions.ClientException(
-                "Instance unexpectedly has status '%s'" % status
+                "Instance '%s' unexpectedly has status '%s'" % (self.instance.id, status)
             )
+        volumes = self.nova.volumes.get_server_volumes(self.instance.id)
+        for volume in volumes:
+            self.logger.debug(volume)
         self.logger.info(
             "Instance '%s' has status '%s', waiting %ds for boot",
             self.instance.id,
@@ -158,11 +163,11 @@ class Canary(object):
             self.volume = self.cinder.volumes.get(self.volume.id)
             status = self.volume.status
         if status != 'available':
-            raise nova_exceptions.ClientException(
-                "Volume unexpectedly has status '%s'" % status
+            raise cinder_exceptions.ClientException(
+                "Volume '%s' unexpectedly has status '%s'" % (self.volume.id, status)
             )
         self.logger.info(
-            "Volume %s created",
+            "Volume '%s' created",
             self.volume.id
         )
 
@@ -298,11 +303,9 @@ class Canary(object):
             if regex.match(line):
                 found_canary = True
         if not found_canary:
-            for line in stderr:
-                line = line.rstrip()
-                self.logger.debug('STDERR: ' + line)
-            for line in stdout_lines:
-                self.logger.debug('STDOUT: ' + line)
+            stderr_lines = [line for line in stderr]
+            self.logger.debug('STDERR:\n' + ''.join(stderr_lines))
+            self.logger.debug('STDOUT:\n' + ''.join(stdout_lines))
             raise ValueError("Expected output not found in test command")
 
     def test_ssh_echo(self, client):
@@ -335,6 +338,17 @@ class Canary(object):
             "SSH host resolution successful"
         )
 
+    def test_ssh_volume(self, client):
+        dev = self.params['volume_device']
+        self.test_ssh_cmd_output(
+            client,
+            'sudo mkfs.ext4 ' + dev + ' && sudo mount ' + dev + ' /mnt && sudo sh -c "echo SOME_DATA > /mnt/testfile" && sudo cat /mnt/testfile && sudo rm /mnt/testfile && sudo umount /mnt',
+            r'^SOME_DATA$'
+        )
+        self.logger.info(
+            "SSH volume test successful"
+        )
+
     def test_ssh_address(self, netname, address):
         try:
             client = SSHClient()
@@ -349,6 +363,7 @@ class Canary(object):
             self.test_ssh_ping_host(client, self.params['ssh_ping_target'])
         if 'ssh_resolve_target' in self.params and self.params['ssh_resolve_target']:
             self.test_ssh_resolve_host(client, self.params['ssh_resolve_target'])
+        self.test_ssh_volume(client)
 
     def test_address(self, netname, address):
         self.logger.info(

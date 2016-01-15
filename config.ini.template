@@ -40,7 +40,10 @@ ssh_ping_target=8.8.8.8
 ssh_resolve_target=www.google.com
 # Cinder volume name
 volume_name=canary_volume
-# Size of Cinder volume in GB
+# Size of Cinder volume in GB (0 or unset to disable volume test)
 volume_size=
+# Device Cinder volume will appear as inside guest.
+# This depends on the Nova flavor used.
+volume_device=
 # To disable cleanup at end of test, set to empty value:
 #cleanup=
