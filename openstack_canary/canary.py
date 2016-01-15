@@ -137,10 +137,37 @@ class Canary(object):
             self.logger.debug('STDOUT:\n' + ''.join(stdout_lines))
             raise ValueError("Expected output not found in test command")
 
+    def test_ssh_script_output(self, client, script, args, pattern):
+        regex = re.compile(pattern)
+        remote_script = '/tmp/canary'
+        sftp = client.open_sftp()
+
+        def on_progress(so_far, remaining):
+            if remaining:
+                return  # Not finished yet
+            sftp.chmod(remote_script, 755)
+            sftp.close()
+            # FIXME: SHellcode injection
+            stdin, stdout, stderr = client.exec_command(remote_script + ' ' + ' '.join(args))
+            found_canary = False
+            stdin.close()
+            stdout_lines = [line for line in stdout]
+            for line in stdout_lines:
+                line = line.rstrip()
+                if regex.match(line):
+                    found_canary = True
+            if not found_canary:
+                stderr_lines = [line for line in stderr]
+                self.logger.debug('STDERR:\n' + ''.join(stderr_lines))
+                self.logger.debug('STDOUT:\n' + ''.join(stdout_lines))
+                raise ValueError("Expected output not found in test command")
+        sftp.put(script, remote_script, callback=on_progress, confirm=True)
+
     def test_ssh_echo(self, client):
-        self.test_ssh_cmd_output(
+        self.test_ssh_script_output(
             client,
-            'echo CANARY_PAYLOAD',
+            'test_echo.sh',
+            ('CANARY_PAYLOAD'),
             r'^CANARY_PAYLOAD$'
         )
         self.logger.info(
@@ -148,9 +175,10 @@ class Canary(object):
         )
 
     def test_ssh_ping_host(self, client, host):
-        self.test_ssh_cmd_output(
+        self.test_ssh_script_output(
             client,
-            'ping -c 1 ' + host,
+            'test_ping.sh',
+            (host),
             r'[0-9]+ bytes from ' + host
         )
         self.logger.info(
@@ -211,6 +239,7 @@ class Canary(object):
                 self.params['ssh_resolve_target']
             )
         self.test_ssh_volume(client)
+        client.close()
 
     def test_public_addrs(self):
         self.make_internet_accessible()
