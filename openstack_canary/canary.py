@@ -165,37 +165,48 @@ class Canary(object):
                 raise ValueError("Expected output not found in test script")
         sftp.put(script, remote_script, callback=on_progress, confirm=True)
 
+    tests = dict({
+        'echo': dict({
+            'match': r'^CANARY_PAYLOAD$'
+        }),
+        'ping': dict({
+            'match': r'[0-9]+ bytes from '
+        }),
+        'dns': dict({
+            'match': r' has (.* )?address'
+        })
+    })
+
+    def test_ssh(self, client, test_name, args):
+        self.test_ssh_script_output(
+            client,
+            'test_' + test_name + '.sh',
+            args,
+            self.tests[test_name]['match']
+        )
+        self.logger.info(
+            "SSH " + test_name + " test successful"
+        )
+
     def test_ssh_echo(self, client):
-        self.test_ssh_script_output(
+        self.test_ssh(
             client,
-            'test_echo.sh',
-            ('CANARY_PAYLOAD'),
-            r'^CANARY_PAYLOAD$'
-        )
-        self.logger.info(
-            "SSH echo test successful"
+            'echo',
+            ('CANARY_PAYLOAD')
         )
 
-    def test_ssh_ping_host(self, client, host):
-        self.test_ssh_script_output(
+    def test_ssh_ping(self, client, host):
+        self.test_ssh(
             client,
-            'test_ping.sh',
+            'ping',
             (host),
-            r'[0-9]+ bytes from ' + host
-        )
-        self.logger.info(
-            "SSH ping test successful"
         )
 
-    def test_ssh_resolve_host(self, client, host):
-        self.test_ssh_script_output(
+    def test_ssh_dns(self, client, host):
+        self.test_ssh(
             client,
-            'test_dns.sh',
-            (host),
-            r'^' + host + ' has (.* )?address'
-        )
-        self.logger.info(
-            "SSH host resolution successful"
+            'dns',
+            (host)
         )
 
     def test_ssh_volume(self, client, dev):
@@ -225,12 +236,12 @@ class Canary(object):
             raise
         self.test_ssh_echo(client)
         if 'ssh_ping_target' in self.params and self.params['ssh_ping_target']:
-            self.test_ssh_ping_host(client, self.params['ssh_ping_target'])
+            self.test_ssh_ping(client, self.params['ssh_ping_target'])
         if (
             'ssh_resolve_target' in self.params and
             self.params['ssh_resolve_target']
         ):
-            self.test_ssh_resolve_host(
+            self.test_ssh_dns(
                 client,
                 self.params['ssh_resolve_target']
             )
