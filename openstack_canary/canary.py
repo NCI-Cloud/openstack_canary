@@ -225,8 +225,22 @@ class Canary(object):
             # ssh.load_system_host_keys()
             """
             VM instances' IP addresses are indeterminate,
-            so there is no good way to defend against
+            so there is no good way to detect
             a Man In The Middle attack.
+            The fact that a different instance now has the same IP address
+            could be a MITM attack, or it could be due to deletion
+            of the old instance, or it could be due to re-arranging of
+            IP addresses among the same set of instances.
+            We don't care much about MITM attacks anyway - they would
+            merely cause us to test the correct functioning of some
+            attacker's computer, instead of our instance, which would
+            be bad only if the attacker's computer were less broken
+            than our instance, thus hiding problems with our instance.
+            This is a less bad problem than SSH connectivity randomly
+            failing when IP addresses get re-used.
+            So just disable protection against MITM attacks, by:
+            1. Auto-adding unknown hosts to the known hosts file and
+            2. Not loading any known hosts files.
             """
             ssh.set_missing_host_key_policy(AutoAddPolicy())
             ssh.connect(address, username=self.params['ssh_username'])
