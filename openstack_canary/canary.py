@@ -243,7 +243,7 @@ class Canary(object):
             2. Not loading any known hosts files.
             """
             ssh.set_missing_host_key_policy(AutoAddPolicy())
-            ssh.connect(address, username=self.params['ssh_username'])
+            ssh.connect(address, username=self.params['ssh_username'], key_filename=self.params['ssh_key_file'])
         except:
             self.logger.debug(self.instance().get_console_output(10))
             raise
