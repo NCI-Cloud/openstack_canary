@@ -175,7 +175,6 @@ class Session(object):
             time.sleep(int(self.params['poll_secs']))
             inst = self.get_nova().servers.get(instance_id)
         if inst.status == 'ERROR':
-            self.logger.error(inst.diagnostics())
             raise nova_exceptions.InstanceInErrorState()
         if inst.status != 'ACTIVE':
             self.logger.error(inst.diagnostics())
