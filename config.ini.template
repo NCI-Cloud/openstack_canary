@@ -22,6 +22,8 @@ flavor_name=
 instance_name=canary
 # Name of Nova availability zone in which to start instance
 availability_zone=
+# Optional name of Neutron network to attach to instance
+network_id=
 # Nova instance user data to be passed to instance at boot
 user_data=
 # Nova SSH keypair name to add to instance at boot
