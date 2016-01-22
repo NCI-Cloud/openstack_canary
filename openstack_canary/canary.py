@@ -3,6 +3,7 @@ A Canary OpenStack instance, used to test basic OpenStack functionality.
 '''
 
 from openstack_canary.session import Session
+import stat
 import time
 import re
 from paramiko.client import SSHClient
@@ -121,49 +122,33 @@ class Canary(object):
             )
             self.attach_any_floating_ip_to_any_private_port()
 
-    def test_ssh_cmd_output(self, ssh, command, pattern):
+    def test_ssh_script_output(self, address, script, args, pattern):
+        ssh = self.ssh(address)
         regex = re.compile(pattern)
-        stdin, stdout, stderr = ssh.exec_command(command)
-        found_canary = False
+        remote_script = '/tmp/' + script
+        sftp = ssh.open_sftp()
+        sftp.put(script, remote_script, confirm=True)
+        sftp.chmod(remote_script, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        sftp.close()
+        ssh.close()
+        ssh = self.ssh(address)
+        # FIXME: Shellcode injection
+        stdin, stdout, stderr = ssh.exec_command(
+            remote_script + ' ' + ' '.join(args)
+        )
+        found_pattern = False
         stdin.close()
-        stdout_lines = [line for line in stdout]
-        for line in stdout_lines:
+        for line in stdout:
             line = line.rstrip()
             if regex.match(line):
-                found_canary = True
-        if not found_canary:
+                found_pattern = True
+        exit_status = stdout.channel.recv_exit_status()
+        if exit_status != 0 or not found_pattern:
             stderr_lines = [line for line in stderr]
             self.logger.debug('STDERR:\n' + ''.join(stderr_lines))
             self.logger.debug('STDOUT:\n' + ''.join(stdout_lines))
-            raise ValueError("Expected output not found in test command")
-
-    def test_ssh_script_output(self, ssh, script, args, pattern):
-        regex = re.compile(pattern)
-        remote_script = '/tmp/canary'
-        sftp = ssh.open_sftp()
-
-        def on_progress(so_far, remaining):
-            if remaining:
-                return  # Not finished yet
-            sftp.chmod(remote_script, 755)
-            sftp.close()
-            # FIXME: Shellcode injection
-            stdin, stdout, stderr = ssh.exec_command(
-                remote_script + ' ' + ' '.join(args)
-            )
-            found_canary = False
-            stdin.close()
-            stdout_lines = [line for line in stdout]
-            for line in stdout_lines:
-                line = line.rstrip()
-                if regex.match(line):
-                    found_canary = True
-            if not found_canary:
-                stderr_lines = [line for line in stderr]
-                self.logger.debug('STDERR:\n' + ''.join(stderr_lines))
-                self.logger.debug('STDOUT:\n' + ''.join(stdout_lines))
-                raise ValueError("Expected output not found in test script")
-        sftp.put(script, remote_script, callback=on_progress, confirm=True)
+            raise ValueError("Test script did not yield expected output and exit status")
+        ssh.close()
 
     tests = dict({
         'echo': dict({
@@ -180,9 +165,9 @@ class Canary(object):
         })
     })
 
-    def test_ssh(self, ssh, test_name, args):
+    def test_ssh(self, address, test_name, args):
         self.test_ssh_script_output(
-            ssh,
+            address,
             'test_' + test_name + '.sh',
             args,
             self.tests[test_name]['match']
@@ -191,32 +176,32 @@ class Canary(object):
             "SSH " + test_name + " test successful"
         )
 
-    def test_ssh_echo(self, ssh):
-        self.test_ssh(
-            ssh,
+    def test_ssh_echo(self, address):
+        return self.test_ssh(
+            address,
             'echo',
-            ('CANARY_PAYLOAD')
+            [ 'CANARY_PAYLOAD' ]
         )
 
-    def test_ssh_ping(self, ssh, host):
+    def test_ssh_ping(self, address, host):
         self.test_ssh(
-            ssh,
+            address,
             'ping',
-            (host),
+            [ host ],
         )
 
-    def test_ssh_dns(self, ssh, host):
-        self.test_ssh(
-            ssh,
+    def test_ssh_dns(self, address, host):
+        return self.test_ssh(
+            address,
             'dns',
-            (host)
+            [ host ]
         )
 
-    def test_ssh_volume(self, ssh, dev):
-        self.test_ssh(
-            ssh,
+    def test_ssh_volume(self, address, dev):
+        return self.test_ssh(
+            address,
             'volume',
-            (dev, 'SOME_DATA')
+            [ dev, 'SOME_DATA' ]
         )
 
     def ssh(self, address):
@@ -255,21 +240,19 @@ class Canary(object):
             address,
             netname
         )
-        ssh = self.ssh(address)
-        self.test_ssh_echo(ssh)
+        self.test_ssh_echo(address)
         if 'ssh_ping_target' in self.params and self.params['ssh_ping_target']:
-            self.test_ssh_ping(ssh, self.params['ssh_ping_target'])
+            self.test_ssh_ping(address, self.params['ssh_ping_target'])
         if (
             'ssh_resolve_target' in self.params and
             self.params['ssh_resolve_target']
         ):
             self.test_ssh_dns(
-                ssh,
+                address,
                 self.params['ssh_resolve_target']
             )
         if self.volume_id:
-            self.test_ssh_volume(ssh, self.params['volume_device'])
-        ssh.close()
+            self.test_ssh_volume(address, self.params['volume_device'])
 
     def test_public_addrs(self):
         self.make_internet_accessible()
