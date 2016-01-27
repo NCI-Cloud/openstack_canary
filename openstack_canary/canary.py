@@ -158,6 +158,7 @@ class Canary(object):
             'match': r'[0-9]+ bytes from '
         }),
         'dns': dict({
+            'enabled': False,
             'match': r' has (.* )?address'
         }),
         'volume': dict({
@@ -176,28 +177,39 @@ class Canary(object):
             "SSH " + test_name + " test successful"
         )
 
-    def test_ssh_echo(self, address):
+    def test_echo(self, address, params):
         return self.test_ssh(
             address,
             'echo',
             [ 'CANARY_PAYLOAD' ]
         )
 
-    def test_ssh_ping(self, address, host):
+    def test_ping(self, address, params):
+        if 'ssh_ping_target' not in params or not params['ssh_ping_target']:
+            return # No ping test configured
+        host = params['ssh_ping_target']
         self.test_ssh(
             address,
             'ping',
             [ host ],
         )
 
-    def test_ssh_dns(self, address, host):
+    def test_dns(self, address, params):
+        if (
+            'ssh_resolve_target' not in params or
+            not params['ssh_resolve_target']
+        ):
+            return # Test not configured
         return self.test_ssh(
             address,
             'dns',
             [ host ]
         )
 
-    def test_ssh_volume(self, address, dev):
+    def test_volume(self, address, params):
+        if not params['volume_device']:
+            return # Test not configured
+        dev = params['volume_device']
         return self.test_ssh(
             address,
             'volume',
@@ -240,19 +252,10 @@ class Canary(object):
             address,
             netname
         )
-        self.test_ssh_echo(address)
-        if 'ssh_ping_target' in self.params and self.params['ssh_ping_target']:
-            self.test_ssh_ping(address, self.params['ssh_ping_target'])
-        if (
-            'ssh_resolve_target' in self.params and
-            self.params['ssh_resolve_target']
-        ):
-            self.test_ssh_dns(
-                address,
-                self.params['ssh_resolve_target']
-            )
-        if self.volume_id:
-            self.test_ssh_volume(address, self.params['volume_device'])
+        for test_name, test in self.tests.iteritems():
+            if 'enabled' not in test or test['enabled']:
+                func = getattr(self, 'test_' + test_name)
+                func(address, self.params)
 
     def test_public_addrs(self):
         self.make_internet_accessible()
