@@ -71,26 +71,46 @@ class Canary(object):
         time.sleep(int(self.params['boot_wait']))
 
     def delete_instance(self):
+        """
+        Delete the test instance, if any.
+        """
         if self.instance_id:
             self.session.delete_instance(self.instance_id)
             self.instance_id = None
 
     def instance(self):
+        """
+        Return the instance's UUID.
+        """
         return self.session.get_nova().servers.get(self.instance_id)
 
     def volume(self):
+        """
+        Return the UUID of the test volume attached to the instance.
+        """
         return self.session.get_cinder().volumes.get(self.volume_id)
 
     def get_attached_volumes(self):
+        """
+        Return volume class instances representing
+        all of the volumes attached to the instance.
+        """
         return self.session.get_server_volumes(self.instance_id)
 
     def delete_volume(self):
+        """
+        Delete the test volume, if any.
+        """
         if self.volume_id:
             if self.own_volume:
                 self.session.delete_volume(self.volume_id)
             self.volume_id = None
 
     def _iter_ports_of_private_ips(self):
+        """
+        Generator function, iterating over the ports associated with
+        each of the instance's RFC1918 addresses.
+        """
         for (netname, address) in self.session.iter_private_addrs(
             self.instance_id
         ):
@@ -105,6 +125,11 @@ class Canary(object):
                     yield port
 
     def attach_any_floating_ip_to_any_private_port(self):
+        """
+        Attach any one available floating IP address to any one
+        of the instance's ports that is currently associated
+        with an RFC1918 address.
+        """
         for port in self._iter_ports_of_private_ips():
             self.floating_ip = self.session.attach_any_floating_ip_to_port(
                 port
@@ -112,6 +137,9 @@ class Canary(object):
             return
 
     def make_internet_accessible(self):
+        """
+        Cause the instance to become accessible over the Internet.
+        """
         public_addrs = [addr for addr in self.session.iter_public_addrs(
             self.instance_id
         )]
@@ -123,6 +151,12 @@ class Canary(object):
             self.attach_any_floating_ip_to_any_private_port()
 
     def test_ssh_script_output(self, address, script, args, pattern):
+        """
+        Execute the given script remotely on the instance, and check that:
+        1. It exits with status zero (meaning success); and
+        2. It outputs at least one line which matches the given
+        regular expression.
+        """
         ssh = self.ssh(address)
         regex = re.compile(pattern)
         remote_script = '/tmp/' + script
@@ -145,9 +179,12 @@ class Canary(object):
         exit_status = stdout.channel.recv_exit_status()
         if exit_status != 0 or not found_pattern:
             stderr_lines = [line for line in stderr]
+            stdout_lines = [line for line in stdout]
             self.logger.debug('STDERR:\n' + ''.join(stderr_lines))
             self.logger.debug('STDOUT:\n' + ''.join(stdout_lines))
-            raise ValueError("Test script did not yield expected output and exit status")
+            raise ValueError(
+                "Test script did not yield expected output and exit status"
+            )
         ssh.close()
 
     tests = dict({
@@ -166,6 +203,9 @@ class Canary(object):
     })
 
     def test_ssh(self, address, test_name, args):
+        """
+        Run a named test remotely using SSH.
+        """
         self.test_ssh_script_output(
             address,
             'test_' + test_name + '.sh',
@@ -177,34 +217,49 @@ class Canary(object):
         )
 
     def test_ssh_echo(self, address):
+        """
+        Test running a simple script within the instance.
+        """
         return self.test_ssh(
             address,
             'echo',
-            [ 'CANARY_PAYLOAD' ]
+            ['CANARY_PAYLOAD']
         )
 
     def test_ssh_ping(self, address, host):
+        """
+        Test connectivity using 'ping' from within the instance.
+        """
         self.test_ssh(
             address,
             'ping',
-            [ host ],
+            [host],
         )
 
     def test_ssh_dns(self, address, host):
+        """
+        Test DNS resolution from within the instance.
+        """
         return self.test_ssh(
             address,
             'dns',
-            [ host ]
+            [host]
         )
 
     def test_ssh_volume(self, address, dev):
+        """
+        Test use of a volume within the instance.
+        """
         return self.test_ssh(
             address,
             'volume',
-            [ dev, 'SOME_DATA' ]
+            [dev, 'SOME_DATA']
         )
 
     def ssh(self, address):
+        """
+        Create an SSH connection to the instance.
+        """
         try:
             ssh = SSHClient()
             # ssh.load_system_host_keys()
@@ -228,13 +283,20 @@ class Canary(object):
             2. Not loading any known hosts files.
             """
             ssh.set_missing_host_key_policy(AutoAddPolicy())
-            ssh.connect(address, username=self.params['ssh_username'], key_filename=self.params['ssh_key_file'])
+            ssh.connect(
+                address,
+                username=self.params['ssh_username'],
+                key_filename=self.params['ssh_key_file']
+            )
         except:
             self.logger.debug(self.instance().get_console_output(10))
             raise
         return ssh
 
     def test_address(self, netname, address):
+        """
+        Run all tests against the given IP address of the instance.
+        """
         self.logger.info(
             "Testing address '%s' on network '%s'",
             address,
@@ -255,6 +317,10 @@ class Canary(object):
             self.test_ssh_volume(address, self.params['volume_device'])
 
     def test_public_addrs(self):
+        """
+        Run tests against each of the instance's public (non RFC1918)
+        IP addresses.
+        """
         self.make_internet_accessible()
         public_addrs = [addr for addr in self.session.iter_public_addrs(
             self.instance_id
@@ -265,6 +331,9 @@ class Canary(object):
             self.test_address(netname, address)
 
     def delete(self):
+        """
+        Delete the test instance and volume, if any.
+        """
         if 'cleanup' in self.params:
             cleanup = self.params['cleanup']
         else:
