@@ -43,7 +43,7 @@ floatip_wait=5
 # For Red Hat and derived distros, this is usually 'fedora' or 'centos'.
 ssh_username=
 # SSH private key for authentication. Must match key_name.
-sssh_key_file=
+ssh_key_file=
 # An IP address to ping from inside the instance
 ssh_ping_target=8.8.8.8
 # A hostname to resolve inside the instance
