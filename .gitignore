@@ -3,3 +3,4 @@
 config.ini
 *.pyc
 *.pyo
+config.ini.nectar
