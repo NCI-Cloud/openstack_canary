@@ -5,10 +5,13 @@ from novaclient import client as nova_client
 import novaclient.exceptions as nova_exceptions
 from cinderclient import client as cinder_client
 import cinderclient.exceptions as cinder_exceptions
+from glanceclient import client as glance_client
+import glanceclient.exc as glance_exceptions
 from neutronclient.v2_0 import client as neutron_client
 from neutronclient.common.exceptions import Conflict, IpAddressInUseClient
 import time
 import logging
+from pprint import pprint
 
 RFC1918_PATTERNS = (
     r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$',
@@ -27,8 +30,9 @@ def is_rfc1918(address):
 
 
 # FIXME: Obtain these from client libraries or Keystone catalog
-NOVA_API_VERSIONS = ("3", "2", "1.1")
+NOVA_API_VERSIONS = ("2", "1.1")
 CINDER_API_VERSIONS = ("2", "1")
+GLANCE_API_VERSIONS = ("2")
 
 
 class Session(object):
@@ -38,6 +42,7 @@ class Session(object):
         self.logger = logging.getLogger(__package__)
         self.nova = None
         self.keystone = None
+        self.glance = None
         self.cinder = None
         self.neutron = None
         self.token = None
@@ -51,7 +56,8 @@ class Session(object):
             project_name=self.params['tenant_name'],
             auth_url=self.params['auth_url']
         )
-        self.keystone.authenticate()
+        if not self.keystone.authenticate():
+            raise ValueError("Keystone authenticate returned false")
         self.token = self.keystone.auth_ref['token']['id']
         # self.logger.debug("Got token: '%s'", self.token)
 
@@ -76,6 +82,32 @@ class Session(object):
                 )
         if self.nova is None:
             raise nova_exceptions.UnsupportedVersion()
+
+    def _init_glance(self):
+        if self.glance:
+            return # Already initialised
+        # The Glance client (unlike other clients) needs to be told its service endpoint.
+        # So look this up in the Keystone catalog.
+        keystone = self.get_keystone()
+        if not keystone.has_service_catalog():
+            raise ValueError("Keystone unable to provide service catalog")
+        url = keystone.service_catalog.url_for(service_type = 'image', endpoint_type = 'public')
+        for version in GLANCE_API_VERSIONS:
+            try:
+                self.glance = glance_client.Client(
+                    version,
+                    endpoint = url,
+                    token = self.token
+                )
+            except glance_exceptions.ClientException as exc:
+                self.logger.debug(
+                    "Failed to instantiate Glance client" +
+                    " for API version '%s': %s",
+                    version,
+                    exc
+                )
+        if self.glance is None:
+            raise Exception("No supported Glance API version found")
 
     def _init_cinder(self):
         if self.cinder:
@@ -109,9 +141,17 @@ class Session(object):
             auth_url=self.params['auth_url']
         )
 
+    def get_keystone(self):
+        self._init_keystone()
+        return self.keystone
+
     def get_nova(self):
         self._init_nova()
         return self.nova
+
+    def get_glance(self):
+        self._init_glance()
+        return self.glance
 
     def get_cinder(self):
         self._init_cinder()
@@ -158,12 +198,14 @@ class Session(object):
             })
         )
 
-    def _wait_instance_creation(self, instance_id):
+    def wait_instance_state(self, instance_id, state):
         attempts = 0
         inst = self.get_nova().servers.get(instance_id)
+        state = state.lower()
         while (
-            attempts < int(self.params['poll_max']) and
-            inst.status == 'BUILD'
+            attempts < int(self.params['poll_max'])
+            and inst.status.lower() != state
+            and inst.status.lower() != 'error'
         ):
             self.logger.debug(
                 "Instance '%s' has status '%s', waiting %ds",
@@ -174,9 +216,9 @@ class Session(object):
             attempts += 1
             time.sleep(int(self.params['poll_secs']))
             inst = self.get_nova().servers.get(instance_id)
-        if inst.status == 'ERROR':
+        if inst.status.lower() == 'error':
             raise nova_exceptions.InstanceInErrorState()
-        if inst.status != 'ACTIVE':
+        if inst.status.lower() != state:
             self.logger.error(inst.diagnostics())
             raise nova_exceptions.ClientException(
                 "Instance '%s' unexpectedly has status '%s'" %
@@ -187,6 +229,9 @@ class Session(object):
             instance_id,
             inst.status
         )
+
+    def wait_instance_creation(self, instance_id):
+        return self.wait_instance_state(instance_id, 'ACTIVE')
 
     def create_instance(self, flavour_id, bdm, nics, params):
         instance = self.get_nova().servers.create(
@@ -200,7 +245,7 @@ class Session(object):
             key_name=params['key_name'],
             security_groups=params['security_group_names'].split()
         )
-        self._wait_instance_creation(instance.id)
+        self.wait_instance_creation(instance.id)
         return instance.id
 
     def _wait_instance_deleted(self, instance_id):
@@ -226,12 +271,14 @@ class Session(object):
     def get_server_volumes(self, instance_id):
         return self.get_nova().volumes.get_server_volumes(instance_id)
 
-    def _wait_volume_creation(self, volume_id):
+    def wait_volume_state(self, volume_id, state):
         attempts = 0
         vol = self.get_cinder().volumes.get(volume_id)
+        state = state.lower()
         while (
-            attempts < int(self.params['poll_max']) and
-            vol.status == 'creating'
+            attempts < int(self.params['poll_max'])
+            and vol.status.lower() != state
+            and vol.status.lower() != 'error'
         ):
             self.logger.debug(
                 "Volume '%s' has status '%s', waiting %ds",
@@ -242,15 +289,18 @@ class Session(object):
             attempts += 1
             time.sleep(int(self.params['poll_secs']))
             vol = self.get_cinder().volumes.get(volume_id)
-        if vol.status != 'available':
+        if vol.status.lower() != state:
             raise cinder_exceptions.ClientException(
                 "Volume '%s' unexpectedly has status '%s'" %
                 (volume_id, vol.status)
             )
         self.logger.info(
-            "Volume '%s' created",
-            volume_id
+            "Volume '%s' has status '%s'",
+            volume_id, state
         )
+
+    def wait_volume_creation(self, volume_id):
+        return self.wait_volume_state(volume_id, 'available')
 
     def create_volume(self, params):
         volume = self.get_cinder().volumes.create(
@@ -258,10 +308,10 @@ class Session(object):
             display_name=params['volume_name'],
             size=int(params['volume_size'])
         )
-        self._wait_volume_creation(volume.id)
+        self.wait_volume_creation(volume.id)
         return volume.id
 
-    def _wait_volume_deleted(self, volume_id):
+    def wait_volume_deleted(self, volume_id):
         attempts = 0
         while attempts < int(self.params['poll_max']):
             try:
@@ -277,9 +327,37 @@ class Session(object):
             attempts += 1
             time.sleep(int(self.params['poll_secs']))
 
+    def wait_image_state(self, image_id, state):
+        attempts = 0
+        img = self.get_glance().images.get(image_id)
+        state = state.lower()
+        while (
+            attempts < int(self.params['poll_max'])
+            and img.status.lower() != state
+            and img.status.lower() != 'error'
+        ):
+            self.logger.debug(
+                "Image '%s' has status '%s', waiting %ds",
+                image_id,
+                img.status,
+                int(self.params['poll_secs'])
+            )
+            attempts += 1
+            time.sleep(int(self.params['poll_secs']))
+            img = self.get_glance().images.get(image_id)
+        if img.status.lower() != state:
+            raise glance_exceptions.ClientException(
+                "Image '%s' unexpectedly has status '%s'" %
+                (image_id, img.status)
+            )
+        self.logger.info(
+            "Image '%s' has status '%s'",
+            image_id, state
+        )
+
     def delete_volume(self, volume_id):
         self.get_cinder().volumes.get(volume_id).delete()
-        self._wait_volume_deleted(volume_id)
+        self.wait_volume_deleted(volume_id)
 
     def attach_any_floating_ip_to_port(self, port):
         attempt_number = 0
@@ -335,3 +413,10 @@ class Session(object):
         for netname, address in self.iter_addrs(instance_id):
             if self._is_public(address):
                 yield (netname, address)
+
+    def find_image_name_regex(self, regex):
+        for image in self.get_glance().images.list():
+            # pprint(image)
+            if image.name is not None and re.search(r'(?i)' + regex, image.name):
+                return image
+        raise ValueError("No matching Glance image found")
