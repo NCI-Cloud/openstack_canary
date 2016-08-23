@@ -174,7 +174,7 @@ class Canary(object):
         stdin.close()
         for line in stdout:
             line = line.rstrip()
-            if regex.match(line):
+            if regex.search(line):
                 found_pattern = True
         exit_status = stdout.channel.recv_exit_status()
         if exit_status != 0 or not found_pattern:
@@ -183,7 +183,7 @@ class Canary(object):
             self.logger.debug('STDERR:\n' + ''.join(stderr_lines))
             self.logger.debug('STDOUT:\n' + ''.join(stdout_lines))
             raise ValueError(
-                "Test script did not yield expected output and exit status"
+                "Test script '" + script + "' did not yield expected output and exit status"
             )
         ssh.close()
 
