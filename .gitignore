@@ -1,6 +1,5 @@
 .project
 .pydevproject
-config.ini
+config.ini*
 *.pyc
 *.pyo
-config.ini.nectar
